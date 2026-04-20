@@ -1,0 +1,1 @@
+/share/home/lililei1/kcfu/models/real_WRF_WPS/V4.1/WRF-4.1/test/em_real/sub_wrf.sh
