@@ -183,7 +183,8 @@ if __name__ == '__main__':
     K = 1 
     target_lat = 13.2933
     target_lon = 147.1829
-    
+    degree_scale = 5
+    lats = np.linspace(target_lat-degree_scale,target_lat+degree_scale,0.1)
     jidx, iidx = get_ij_from_latlon(f'{prior_dir}/firstguess_d01.mem001',target_lat , target_lon)
     # 模拟输入数据（请替换为你自己的同化输出数据）
     # 注意：这里的数据形状是 (K, N_members)

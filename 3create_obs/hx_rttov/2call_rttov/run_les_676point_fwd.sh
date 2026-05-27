@@ -16,9 +16,9 @@ fi
 
 # Test case input data
 COEF_FILENAME="rtcoef_noaa_18_amsua.dat"
-PROF_FILENAME="prof10_06_00.dat"
+PROF_FILENAME="prof10_00_00.dat"
 NPROF=676
-NLEVELS=56
+NLEVELS=57
 DO_SOLAR=0                                # 0 = solar off / 1 = solar on
 
 NCHAN=6

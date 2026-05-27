@@ -267,7 +267,7 @@ if __name__ == '__main__':
         ]
         
         for var_key, ylabel in plot_configs:
-            save_path = os.path.join(output_dir, f'ts_error_{var_key}.png')
+            save_path = os.path.join(output_dir, f'{filter_kind}_ts_error_{var_key}.png')
             plot_timeseries_diagnostics(
                 df=df, 
                 var_name=var_key, 

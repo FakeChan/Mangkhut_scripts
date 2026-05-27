@@ -18,7 +18,7 @@ def getTCnest(NR_path,domain,var,plev,ocean_lev=0):
         
         # 修改 2: 使用 np.isclose 处理浮点数精度 (例如 299.9999 vs 300)
         # 如果 dx 不接近 300 (允许 0.1m 的误差)，则报错
-        if not np.isclose(dx, 300, atol=0.1):
+        if not np.isclose(dx, 7500, atol=0.1):
             # 修改 3: 使用 raise 抛出异常来终止程序
             raise ValueError(f"Error! Resolution of NR is not 300m. Current DX: {dx}")
             
@@ -36,11 +36,11 @@ def getTCnest(NR_path,domain,var,plev,ocean_lev=0):
     
     
     if domain=='d01':
-        grid_step=25
-        half_grid_size=90/7.5
+        grid_step=1
+        half_grid_size=120/7.5
     elif domain == 'd02':
         grid_step=5
-        half_grid_size=90/1.5
+        half_grid_size=210/1.5
     else:
         raise ValueError(f"Error! domain should be d01\d02, instead of{domain}")
     
@@ -87,16 +87,20 @@ def interp_grid(grid_lats,grid_lons,input_ncdata,input_lats,input_lons,method='l
 
 if __name__ =='__main__':
     var='OM_TMP'
-    domain='d02'
+    domain='d01'
     plev='850hpa'
     ocean_lev=0
     #-----------------------------
-    anal_file_list=['/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/0mem_all_time/10_00_00/firstguess_d02.ensmean',
-                    '/scratch/lililei1/kcfu/tc_mangkhut/5cyclingDA/postAnal_EAKF/d01_10_00_00/analysis_d02.ensmean',
-                    '/scratch/lililei1/kcfu/tc_mangkhut/5cyclingDA/postAnal_QCF_RHF/d01_10_00_00/analysis_d02.ensmean']
+    # anal_file_list=['/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/0mem_all_time/10_00_00/firstguess_d01.ensmean',
+    #                 '/scratch/lililei1/kcfu/tc_mangkhut/5cyclingDA/postAnal_EAKF/d01_10_00_00/analysis_d01.ensmean',
+    #                 '/scratch/lililei1/kcfu/tc_mangkhut/5cyclingDA/postAnal_QCF_RHF/d01_10_00_00/analysis_d01.ensmean']
+    
+    anal_file_list=['/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/0mem_all_time/cyclingDA/10_00_00/firstguess_d01.ensmean',
+                    '/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/2DART/run_dir/EAKF/postassim_mean.nc',
+                    '/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/2DART/run_dir/QCF_RHF/postassim_mean.nc']
     
     title_list=['firstguess','EAKF','QCF_RHF']
-    NR_path='/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/wrfout_d03_2018-09-10_00:00:00'
+    NR_path='/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/wrfout_d01_2018-09-10_00:00:00'
     #-----------------------------
     #first extract NR data
     extract_lats,extract_lons,NR_values=getTCnest(NR_path,domain,var=var,plev=plev,ocean_lev=ocean_lev)

@@ -10,12 +10,13 @@ from scipy.spatial import cKDTree
 wrfrun_dir = "/scratch/lililei1/kcfu/tc_mangkhut/2ens_free_fcst"          # WRF输出所在主目录
 obs_dir = "/share/home/lililei1/kcfu/tc_mangkhut/3create_obs/hx_rttov/4ens_BT"                # 观测Hx文件所在主目录
 profile_dir = "/share/home/lililei1/kcfu/tc_mangkhut/3create_obs/hx_rttov/profile/profile_d01"        # profile经纬度文件所在主目录
-
+sensor='AMSR2'
+ich='4'
 wrf_filename = "wrfout_d01_2018-09-10_00:00:00"
-obs_filename = "obs_d01_ch4_totalline.txt"
+obs_filename =f"obs_d01_ch{ich}_totalline.txt"
 prof_filename = "prof10_00:00.dat" # 如果系统中包含冒号，请将其改为 "prof10_00:00.dat"
 
-output_image_path = "./figs/correlation_profiles.png" # 输出图片的具体位置
+output_image_path = f"./figs/correlation_profiles-{sensor}_ch{ich}.png" # 输出图片的具体位置
 image_dpi = 300                  # 输出图片DPI
 
 num_members = 50                 # 集合成员数量
@@ -83,7 +84,7 @@ for m in range(1, num_members + 1):
     mem_str = f"mem{m:03d}"
     
     # 5.1 读取当前成员的 Hx
-    obs_file = os.path.join(obs_dir, mem_str, 'AMSUA','BT_10_00_00',obs_filename)
+    obs_file = os.path.join(obs_dir, mem_str, sensor,'BT_10_00_00',obs_filename)
     hx_data = np.loadtxt(obs_file)
     Hx_all[:, m-1] = hx_data[sel_idx]
     
@@ -153,10 +154,12 @@ for z in range(nz):
         z_900 = np.argmin(np.abs(P_mean_prof - 90000.0))
         T_900_layer = T_all[p, :, z_900]
         
+        SST_ocean_layer = OM_TMP_all[p,:,0]
+        
         # 计算该点气温与 Hx、QVAPOR与 Hx，以及气温与最靠近900hPa的气温相关系数
         c_T = np.corrcoef(T_layer, Hx_val)[0, 1]
         c_QV = np.corrcoef(QV_layer, Hx_val)[0, 1]
-        c_T900 = np.corrcoef(T_layer, T_900_layer)[0, 1]
+        c_T900 = np.corrcoef(T_layer, SST_ocean_layer)[0, 1]
         
         cov_val = np.cov(T_layer, Hx_val)[0, 1]
         
@@ -204,7 +207,7 @@ axes[1].grid(True, linestyle='--', alpha=0.6)
 
 # 子图3：气温与 900hPa 气温的相关系数
 axes[2].plot(corr_T_T900, layers, color='forestgreen', lw=2)
-axes[2].set_title('Corr(T, T at ~900hPa)', fontsize=14)
+axes[2].set_title('Corr(T, SST)', fontsize=14)
 axes[2].set_xlabel('Correlation Coefficient', fontsize=12)
 axes[2].grid(True, linestyle='--', alpha=0.6)
 

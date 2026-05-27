@@ -16,10 +16,10 @@ fi
 
 # Test case input data
 COEF_FILENAME="rtcoef_noaa_18_amsua.dat"
-MIETABLE_FILENAME="mietable_noaa_amsua.dat" # Location of this file is set below in $MIETABLE_DIR
+MIETABLE_FILENAME="mietable_noaa_amsua.dat"
 PROF_FILENAME="prof10_00_00.dat"
 NPROF=676
-NLEVELS=56
+NLEVELS=57
 
 # The TOTALICE and SNOWRAIN_UNIT options must match the input data in prof.dat
 TOTALICE=${use_total_ice}                                  # 0 = separate ciw, snow; 1 = use totalice
@@ -41,7 +41,7 @@ TEST_DIR=${call_rttov_dir}/call_rttov_test
 BIN_DIR=${rttov_dir}/bin    # BIN directory (may be set with BIN= argument)
 REF_TEST_DIR=../test_example_rttovscatt_fwd.2  # Test reference data
 COEF_DIR=${rtcoef_dir}    # Coefficients directory
-MIETABLE_DIR=/share/home/lililei1/kcfu/rttov/rtcoef_rttov11/mietable    # Mietables directory
+MIETABLE_DIR=/share/home/lililei1/kcfu/models/rttov123/rtcoef_rttov12/mietable    # Mietables directory
 ########################################################################
 
 ARG_ARCH=$(perl -e 'for(@ARGV){m/^ARCH=(\S+)$/o && print "$1";}' $*)
@@ -80,7 +80,7 @@ if [ ! -f $COEF_FILENAME ]; then
   exit 1
 fi
 
-MIETABLE_FILENAME=$MIETABLE_DIR/$MIETABLE_FILENAME
+MIETABLE_FILENAME="mietable_noaa_amsua.dat"
 if [ ! -f $MIETABLE_FILENAME ]; then
   echo "Coef file $MIETABLE_FILENAME not found, aborting..."
   exit 1

@@ -23,7 +23,7 @@ export domain=d01
 
 export npoint=676
 export nlevels=56
-export obserr_std=${obs_err_std:-1.0}
+export obserr_std=${obs_err_std:-0.5}
 #export rttov_scatt=1 # 0 simple cloud scheme; 1 RTTOV-SCATT
 export use_total_ice=1 #0: seperately calculate scatt effect of Snow and Ice; 1: use total ice
 #==============================
@@ -63,6 +63,7 @@ if [[ "$instrument" == "AMSUA" ]];then
 	export rtcoef_dir=${rttov_dir}/rtcoef_rttov12/rttov7pred54L
 	export rtcoef=rtcoef_noaa_18_amsua.dat
 	export chnum=4
+        export MIETABLE_DIR=${rttov_dir}/rtcoef_rttov12/mietable
 elif [[ "$instrument" == "MHS" ]]; then
 	export rtcoef_dir=${rttov_dir}/rtcoef_rttov11/rttov7pred54L
 	export rtcoef=rtcoef_noaa_18_mhs.dat
@@ -70,6 +71,12 @@ elif [[ "$instrument" == "GIIRS" ]]; then
 	export rtcoef_dir=${rttov_dir}/rtcoef_rttov11/rttov7pred101L
 	export rtcoef=rtcoef_fy4_1_giirs_local.dat
 	export chnum=1650
+elif [[ "$instrument" == "AMSR2" ]]; then
+        export rtcoef_dir=${rttov_dir}/rtcoef_rttov12/rttov7pred54L
+        export rtcoef=rtcoef_gcom-w_1_amsr2.dat
+        export chnum=7
+        export MIETABLE_DIR=${rttov_dir}/rtcoef_rttov12/mietable
+        export MIETABLE=mietable_gcom-w_amsr2.dat
 fi
 ln -sf ${rtcoef_dir}/${rtcoef} ${work_dir}/2call_rttov/
 

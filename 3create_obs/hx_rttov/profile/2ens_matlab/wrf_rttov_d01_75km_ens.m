@@ -114,12 +114,18 @@ for yloc=jloc-radius*delta:delta:jloc+(radius+1)*delta
                 error('xloc or yloc invalid')
             end
            pres_prof = interp_prof(pres,xloc,yloc,'P');
+           psfc_point = interp_point(psfc,xloc,yloc,'PSFC');
+           t2_point = interp_point(t2,xloc,yloc,'T2');
+           q2_point = interp_point(q2,xloc,yloc,'Q2');
+           u10_point = interp_point(u10,xloc,yloc,'U10');
+           v10_point = interp_point(v10,xloc,yloc,'V10');
            fprintf(fid,'! Pressure levels (hPa) \r\n');
            for kk=nz:-1:1
                fprintf(fid,'%.4f \r\n',pres_prof(kk)/100.0);
            end
 
            t_prof = interp_prof(t,xloc,yloc,'T');
+           tsk_point = interp_point(tsk,xloc,yloc,'TSK');
            for kk=1:nz
                tk_prof(kk) = wrf_tk(t_prof(kk),pres_prof(kk));
            end
@@ -143,11 +149,11 @@ for yloc=jloc-radius*delta:delta:jloc+(radius+1)*delta
 %           for kk=nz:-1:1
 %               fprintf(fid,'%.4f \r\n',ozone_prof(kk));
 %           end
-           psfc_point = interp_point(psfc,xloc,yloc,'PSFC');
-           t2_point = interp_point(t2,xloc,yloc,'T2');
-           q2_point = interp_point(q2,xloc,yloc,'Q2');
-           u10_point = interp_point(u10,xloc,yloc,'U10');
-           v10_point = interp_point(v10,xloc,yloc,'V10'); 
+        %    psfc_point = interp_point(psfc,xloc,yloc,'PSFC');
+        %    t2_point = interp_point(t2,xloc,yloc,'T2');
+        %    q2_point = interp_point(q2,xloc,yloc,'Q2');
+        %    u10_point = interp_point(u10,xloc,yloc,'U10');
+        %    v10_point = interp_point(v10,xloc,yloc,'V10'); 
            fprintf(fid,'! Near-surface variables: \r\n');
            fprintf(fid,'!  2m T (K)    2m q (kg/kg) 2m p (hPa) 10m wind u (m/s)  10m wind v (m/s)  wind fetch (m) \r\n');
            fprintf(fid,'%.4f   ',t2_point);

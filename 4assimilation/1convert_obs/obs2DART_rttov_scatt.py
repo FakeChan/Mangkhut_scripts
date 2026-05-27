@@ -18,10 +18,12 @@ if __name__ == "__main__":
     use_quantile=True
     #======================================================================================
     #path
-    obs_dir='/share/home/lililei1/kcfu/tc_mangkhut/3create_obs/hx_rttov/3obs_BT/AMSUA'
+    cycle_flag=os.environ.get("cycle_flag")
+    sensor=os.environ.get("sensor")
+    obs_dir=f'/share/home/lililei1/kcfu/tc_mangkhut/3create_obs/hx_rttov/3obs_BT/{sensor}'
     prof_dir='/share/home/lililei1/kcfu/tc_mangkhut/3create_obs/hx_rttov/profile'
     output_dir='/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/1convert_obs'
-    cycle_flag=os.environ.get("cycle_flag")
+    
     if cycle_flag=='1':
         day=os.environ.get("current_day")
         hour=os.environ.get("current_hour")
@@ -40,11 +42,19 @@ if __name__ == "__main__":
     #parameters read into DART
 
     #check https://nwp-saf.eumetsat.int/site/software/rttov/documentation/platforms-supported/ for rttov ids
-    #======================================
-    platform=1              #NOAA        ==
-    sat=18                  #N18         ==
-    sensor=3                #AMSUA       ==
-    #======================================
+    
+    if sensor == 'AMSUA':
+        #======================================
+        platform=1              #NOAA        ==
+        sat=18                  #N18         ==
+        sensor=3                #AMSUA       ==
+        #======================================
+    elif sensor == 'AMSR2':
+        #======================================
+        platform=29              #GCOM-W     ==
+        sat=1                    # 1         ==
+        sensor=63                #AMSR2      ==
+        #======================================
 
     intday=int(day)
     inthour=int(hour)

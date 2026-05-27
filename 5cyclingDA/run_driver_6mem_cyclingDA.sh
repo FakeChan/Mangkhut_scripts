@@ -49,8 +49,8 @@ export filter_kind=1         #1=EAKF,2=QCF_RHF
 export rttov_scatt=0         #0= simple cloud , 1 = rttov-scatt
 export obs_err_std=0.25       #controls sigma_y
 
-export update_ocean=0  #0 = no update ocean
-export run_ocean=0     #1= run wrf with ocean
+export update_ocean=1  #0 = no update ocean
+export run_ocean=1     #1= run wrf with ocean
 
 run_wrf_flag=1
 run_da_flag=1
@@ -87,24 +87,68 @@ if [ "$run_da_flag" -eq 1 ];then
   #             first do DA              -
   #---------------------------------------
   cd ${base_dir}/4assimilation/2DART/run_dir  #enter DART running dir
+
+  #----------------------------------------
+  #step 1: if update_ocean == 1, first inflate ocean and update
   if [ "$update_ocean" -eq 1 ];then
-    cp ./input.nml.all ./input.nml
+    cp ./input.nml.inflateOcean ./input.nml.step1
     if [ "$filter_kind" -eq 1 ]; then
         echo "using EAKF"
       elif [ "$filter_kind" -eq 2 ];then
-        sed -i "s/qceff_table_filename[[:space:]]*=.*/qceff_table_filename  =   'qceff_table_fkc.csv',/g" input.nml
+        sed -i "s/qceff_table_filename[[:space:]]*=.*/qceff_table_filename  =   'qceff_table_fkc.csv',/g" input.nml.step1
+        echo "using QCF_RHF"
+    fi
+  
+    cp input.nml.step1 input.nml
+    rm -f fkc_dart
+    bsub < ./sub_dart.sh
+    # mpirun ./filters
+    elapsed_time=0
+    max_wait_time=3600
+    MIN_SIZE_BYTES=100000000
+    # wait until output done
+    while true;do
+      target_file="${base_dir}/4assimilation/2DART/run_dir/output_d01.mem006"
+      if [ -f "${base_dir}/4assimilation/2DART/run_dir/fkc_dart" ] && [ -f "$target_file" ] ;then
+        actual_size=$(stat -c%s "$target_file")
+        if [ "$actual_size" -ge "$MIN_SIZE_BYTES" ]; then
+          echo "DART successfully done"
+          break
+        fi
+      fi
+      sleep 30
+      elapsed_time=$((elapsed_time + 30))
+
+      if [ "$elapsed_time" -ge "$max_wait_time" ]; then
+          echo "DART time out"
+          exit 999
+      fi
+    done
+
+    mkdir -p ${base_dir}/4assimilation/2DART/run_dir/inflatedOcean
+    mv ${base_dir}/4assimilation/2DART/run_dir/output_d0* ${base_dir}/4assimilation/2DART/run_dir/inflatedOcean
+  fi
+  #----------------------------------------
+  #step2 update air components
+  if [ "$update_ocean" -eq 1 ];then
+    cp ./input.nml.all ./input.nml.step2
+    if [ "$filter_kind" -eq 1 ]; then
+        echo "using EAKF"
+      elif [ "$filter_kind" -eq 2 ];then
+        sed -i "s/qceff_table_filename[[:space:]]*=.*/qceff_table_filename  =   'qceff_table_fkc.csv',/g" input.nml.step2
         echo "using QCF_RHF"
     fi
   elif [ "$update_ocean" -eq 0 ];then
-    cp ./input.nml.air ./input.nml
+    cp ./input.nml.air ./input.nml.step2
     if [ "$filter_kind" -eq 1 ]; then
         echo "using EAKF"
       elif [ "$filter_kind" -eq 2 ];then
-        sed -i "s/qceff_table_filename[[:space:]]*=.*/qceff_table_filename  =   'qceff_table_fkc.csv',/g" input.nml
+        sed -i "s/qceff_table_filename[[:space:]]*=.*/qceff_table_filename  =   'qceff_table_fkc.csv',/g" input.nml.step2
         echo "using QCF_RHF"
     fi
   fi
   rm -f fkc_dart
+  cp ./input.nml.step2 ./input.nml
   bsub < ./sub_dart.sh
   # mpirun ./filters
   elapsed_time=0
@@ -129,6 +173,41 @@ if [ "$run_da_flag" -eq 1 ];then
     fi
   done
 
+  #-------------------------------------------------
+  #step3: if update_ocean ==1 , replace ouput with inflated ocean
+  #!/bin/bash
+  if [ "$update_ocean" -eq 1 ];then
+    OUT_DIR="${base_dir}/4assimilation/2DART/run_dir"    # 存放 output_d01.mem* 的文件夹
+    INF_DIR="${base_dir}/4assimilation/2DART/run_dir/inflatedOcean"   # 存放 inflate_d01.mem* 的文件夹
+
+    echo "开始执行变量移植，将用 $INF_DIR 下的 OM_TMP 覆盖 $OUT_DIR 下的对应文件..."
+
+    # 循环 1 到 50
+    for i in {1..50}; do
+        mem_id=$(printf "%03d" $i)
+        
+        out_file_d01="${OUT_DIR}/output_d01.mem${mem_id}"
+        inf_file_d01="${INF_DIR}/output_d01.mem${mem_id}"
+
+        out_file_d02="${OUT_DIR}/output_d02.mem${mem_id}"
+        inf_file_d02="${INF_DIR}/output_d02.mem${mem_id}"
+        
+        # 检查两个文件是否同时存在
+        if [[ -f "$out_file_d01" && -f "$inf_file_d01" ]]; then
+            echo "Processing member ${mem_id}..."
+            
+            # 核心指令：
+            # -A : 追加模式 (存在同名则覆盖)
+            ncks -A -v OM_TMP,OM_S,OM_U,OM_V "$inf_file_d01" "$out_file_d01"
+            ncks -A -v OM_TMP,OM_S,OM_U,OM_V "$inf_file_d02" "$out_file_d02"
+            
+        else
+            echo "警告: 找不到成员 ${mem_id} 的对应文件，已跳过。"
+        fi
+    done
+
+  fi
+  #-------------------------------------------------
   for imem in "${memlist[@]}";do
     member="mem"`printf %03i ${imem}`
     idx=`printf %03i ${imem}`

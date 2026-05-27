@@ -5,13 +5,14 @@ time=${obs_day}_${obs_hour}_${obs_min}
 #prof_dir=/share/home/lililei1/lfzhou/hyperspectral_da/step1_obs_ensBT/step2_les_obs/3profdata_$domain
 #obs_dir=/share/home/lililei1/lfzhou/hyperspectral_da/step1_obs_ensBT/step2_les_obs/4obsdir_$domain
 #pmax_dir=/share/home/lililei1/lfzhou/hyperspectral_da/step1_obs_ensBT/step4_Pmax/calcPmax_fwd_$domain
-
+export call_rttov_dir=${work_dir}/2call_rttov
 if [ $rttov_scatt -eq 1 ];then
     running_script_file=run_les_676point_fwd_rttov_scatt.sh
+    sed -i "s/MIETABLE_FILENAME=.*$/MIETABLE_FILENAME\=\"$MIETABLE\"/g"           $call_rttov_dir/${running_script_file}
 else
     running_script_file=run_les_676point_fwd.sh
 fi
-export call_rttov_dir=${work_dir}/2call_rttov
+
 cd    $call_rttov_dir
 mkdir -p ${call_rttov_dir}/call_rttov_test ${prof_mem_dir}/${instrument}/ ${obs_mem_dir}/${instrument}
 #sed -i "s/TEST\=.*$/TEST\=\.\/2call_rttov_$domain/g" $call_rttov_dir/run_les_676point_fwd.sh

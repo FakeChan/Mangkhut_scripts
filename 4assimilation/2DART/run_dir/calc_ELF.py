@@ -42,7 +42,7 @@ def calculate_elf_alpha(x_prior_ens, y_prior_ens, x_true, y_true, obs_err_var):
     # B_k = \sigma_u^2 / \sigma_p^2
     var_ratio = u_var / y_var
     A = (var_ratio - 1.0) * y_mean
-    B = var_ratio
+    B = u_var/obs_err_var
     
     # 5. 计算样本回归系数 (\hat{b}_k)
     # 即 x 和 y 的协方差 除以 y 的方差

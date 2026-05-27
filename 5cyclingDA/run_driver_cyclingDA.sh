@@ -32,8 +32,13 @@ cycle_interval=6 #unit:hour
 export max_dom=2
 
 export filter_kind=1         #1=EAKF,2=QCF_RHF
+
+#syhthetic obs settings
+export sensor=AMSUA
+export assim_channel=4
 export rttov_scatt=0         #0= simple cloud , 1 = rttov-scatt
 export obs_err_std=0.25       #controls sigma_y
+
 if [ "$filter_kind" -eq 1 ]; then
   echo "using EAKF"
   export post_anal_base_dir=$scratch_dir/5cyclingDA/postAnal_EAKF

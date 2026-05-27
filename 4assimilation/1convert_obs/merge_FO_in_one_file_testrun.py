@@ -34,8 +34,8 @@ if __name__ == "__main__":
     time_from_env='10_00_00'
     time_list = [time_from_env]
     domain='d01'
-    sensor=os.environ.get("sensor")
-    ch=os.environ.get("assim_channel")
+    sensor='AMSUA'
+    ch=4
     ens_size = 50
     memlist=list(np.arange(1,ens_size+1))
     # memlist.extend([31,32,36,38,39,40,41,42,43,45,47,48,49,50,51,54,62,69,70,71,73])

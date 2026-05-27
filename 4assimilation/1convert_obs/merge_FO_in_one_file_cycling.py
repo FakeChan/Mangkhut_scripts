@@ -33,8 +33,8 @@ if __name__ == "__main__":
     time_from_env=os.environ.get("current_time")
     time_list = [time_from_env]
     domain='d01'
-    sensor='AMSUA'
-    ch=4
+    sensor=os.environ.get("sensor")
+    ch=os.environ.get("assim_channel")
     memlist=list(np.arange(1,51))
     TOP_DIR="/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/1convert_obs"
     BT_DIR='/share/home/lililei1/kcfu/tc_mangkhut/3create_obs/hx_rttov/4ens_BT'

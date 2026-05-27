@@ -16,6 +16,9 @@ if [[ "$instrument" == "AMSUA" ]];then
 elif [[ "$instrument" == "GIIRS" ]]; then
 	export satlon=104.7
 	export satheight=35793
+elif [[ "$instrument" == "AMSR2" ]]; then
+	export satlon=144.7
+	export satheight=700
 fi
 #==============================
 #set domain
@@ -23,11 +26,11 @@ fi
 export domain=d01
 
 export npoint=676
-export nlevels=56
+export nlevels=57
 
 export i_parent_start=27 #same as namelist, used in matlab code to get profile
 export j_parent_start=88
-#export rttov_scatt=0 #${rttov_scatt:0} # 0: simple cloud scheme, 1: rttov_scatt
+export rttov_scatt=0 #${rttov_scatt:0} # 0: simple cloud scheme, 1: rttov_scatt
 export use_total_ice=0 #0: seperately calculate scatt effect of Snow and Ice; 1: use total ice
 #==============================
 #set obs time
@@ -79,6 +82,8 @@ for imem in ${memlist[*]};do
 		export rtcoef_dir=${rttov_dir}/rtcoef_rttov12/rttov7pred54L
 		export rtcoef=rtcoef_noaa_18_amsua.dat
 		export chnum=6
+                export MIETABLE_DIR=${rttov_dir}/rtcoef_rttov12/mietable
+		export MIETABLE=mietable_noaa_amsua.dat
 		
 	elif [[ "$instrument" == "MHS" ]]; then
 		export rtcoef_dir=${rttov_dir}/rtcoef_rttov11/rttov7pred54L
@@ -87,8 +92,15 @@ for imem in ${memlist[*]};do
 		export rtcoef_dir=${rttov_dir}/rtcoef_rttov11/rttov7pred101L
 		export rtcoef=rtcoef_fy4_1_giirs_local.dat
 		export chnum=1650
+        elif [[ "$instrument" == "AMSR2" ]]; then
+		export rtcoef_dir=${rttov_dir}/rtcoef_rttov12/rttov7pred54L
+		export rtcoef=rtcoef_gcom-w_1_amsr2.dat
+		export chnum=7
+		export MIETABLE_DIR=${rttov_dir}/rtcoef_rttov12/mietable
+		export MIETABLE=mietable_gcom-w_amsr2.dat
 	fi
-	ln -sf ${rtcoef_dir}/${rtcoef} ${work_dir}/2call_rttov/
+	ln -sf ${rtcoef_dir}/${rtcoef} ${work_dir}/2call_rttov/call_rttov_test
+	ln -sf ${MIETABLE_DIR}/${MIETABLE} ${work_dir}/2call_rttov/call_rttov_test
 
 	bash ${work_dir}/2call_rttov/${domain}_call_rttov.sh
 	echo "rttov done"
