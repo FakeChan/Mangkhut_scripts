@@ -8,6 +8,6 @@
 !*.sh
 !*.py
 !*.m
-
+!*.fkc
 # 4. 允许 .gitignore 本身
 !.gitignore
