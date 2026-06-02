@@ -1,5 +1,5 @@
 """
-Plot ensemble spread of domain-mean OM_TMP(0, 0, :, :) and PSFC over d02.
+Plot domain-mean ensemble spread for configured WRF variables over d02.
 
 Experiments:
     6mem_oceanAssim0Run0  Assim=0, Run=0
@@ -9,13 +9,12 @@ Experiments:
 Filters:
     EAKF, QCF_RHF
 
-The script recursively searches each member directory for wrfout_d02 files.
-It saves a CSV and a PNG figure.
+The script recursively searches each member directory for wrfout_DOMAIN files.
+It saves one CSV and one PNG figure per configured variable.
 """
 
 from __future__ import annotations
 
-import argparse
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -26,10 +25,60 @@ import xarray as xr
 
 
 DEFAULT_BASE = Path("/scratch/lililei1/kcfu/tc_mangkhut/cycle_test")
+START_TIME = "2018-09-10_00:00:00"
+END_TIME = "2018-09-10_06:00:00"
+STEP_MINUTES = 30
+
 EXPERIMENTS = ["6mem_oceanAssim0Run0", "6mem_oceanAssim0Run1", "6mem_oceanAssim1Run1"]
 OCEAN_EXPERIMENTS = ["6mem_oceanAssim0Run1", "6mem_oceanAssim1Run1"]
 FILTERS = ["EAKF", "QCF_RHF"]
 MEMBERS = ["006", "015", "029", "037", "043", "044"]
+DOMAIN = "d02"
+
+OUT_CSV = Path("./figs/spread_timeseries.csv")
+
+# Configure all variables here. No command-line arguments are used.
+#
+# vertical_level:
+#     None -> variable must be 2-D after selecting Time, e.g. PSFC(Time,y,x).
+#     int  -> variable must be 3-D after selecting Time, e.g. U(Time,z,y,x).
+#
+# scale converts the computed spread to the plotted/output unit. e.g. 100000Pa -> 1000hPa
+VARIABLES = [
+    # {
+    #     "name": "OM_TMP",
+    #     "vertical_level": 0,
+    #     "scale": 1.0,
+    #     "unit": "K",
+    #     "experiments": OCEAN_EXPERIMENTS,
+    #     "out_png": Path("./figs/spread_omtmp_timeseries.png"),
+    # },
+    # {
+    #     "name": "PSFC",
+    #     "vertical_level": None,
+    #     "scale": 0.01,
+    #     "unit": "hPa",
+    #     "experiments": EXPERIMENTS,
+    #     "out_png": Path("./figs/spread_psfc_timeseries.png"),
+    # },
+    {
+        "name": "HFX",
+        "vertical_level": None,
+        "scale": 1,
+        "unit": " ",
+        "experiments": EXPERIMENTS,
+        "out_png": Path("./figs/spread_hfx_timeseries.png"),
+    },
+    # Example for a 3-D atmospheric variable:
+    # {
+    #     "name": "U",
+    #     "vertical_level": 10,
+    #     "scale": 1.0,
+    #     "unit": "m s-1",
+    #     "experiments": EXPERIMENTS,
+    #     "out_png": Path("./figs/spread_u_level10_timeseries.png"),
+    # },
+]
 
 # Okabe-Ito / colorblind-safe scientific palette.
 EXP_COLORS = {
@@ -67,7 +116,7 @@ def find_member_file(base: Path, exp: str, filt: str, member: str, t: datetime) 
     if not member_dir.exists():
         raise FileNotFoundError(f"Missing member directory: {member_dir}")
 
-    pattern = f"wrfout_d02_{wrf_time_name(t)}"
+    pattern = f"wrfout_{DOMAIN}_{wrf_time_name(t)}"
     matches = sorted(member_dir.rglob(pattern))
     if not matches:
         matches = sorted(member_dir.rglob(f"{pattern}*"))
@@ -76,23 +125,47 @@ def find_member_file(base: Path, exp: str, filt: str, member: str, t: datetime) 
     return matches[0]
 
 
-def read_om_tmp_surface(path: Path) -> np.ndarray:
-    with xr.open_dataset(path, decode_times=False) as ds:
-        if "OM_TMP" not in ds:
-            raise KeyError(f"OM_TMP not found in {path}")
-        arr = ds["OM_TMP"]
-        # Requested variable: OM_TMP(0, 0, :, :).
-        # Works for common WRF ocean dims: Time, ocean_layer_stag/ocean_layer, y, x.
-        values = arr.isel({arr.dims[0]: 0, arr.dims[1]: 0}).values.astype(float)
-    return values
+def time_dim_name(arr: xr.DataArray) -> str | None:
+    for dim in arr.dims:
+        if dim.lower() == "time":
+            return dim
+    return None
 
 
-def read_psfc(path: Path) -> np.ndarray:
+def read_variable_field(path: Path, variable: dict) -> np.ndarray:
+    var_name = variable["name"]
+    vertical_level = variable["vertical_level"]
+
     with xr.open_dataset(path, decode_times=False) as ds:
-        if "PSFC" not in ds:
-            raise KeyError(f"PSFC not found in {path}")
-        arr = ds["PSFC"]
-        values = arr.isel({arr.dims[0]: 0}).values.astype(float)
+        if var_name not in ds:
+            raise KeyError(f"{var_name} not found in {path}")
+        arr = ds[var_name]
+        selectors = {}
+        tdim = time_dim_name(arr)
+        if tdim is not None:
+            selectors[tdim] = 0
+        arr = arr.isel(selectors) if selectors else arr
+
+        if arr.ndim == 2:
+            if vertical_level is not None:
+                raise ValueError(
+                    f"{var_name} in {path} is 2-D after Time selection, "
+                    f"but vertical_level={vertical_level} was configured."
+                )
+            values = arr.values.astype(float)
+        elif arr.ndim == 3:
+            if vertical_level is None:
+                raise ValueError(
+                    f"{var_name} in {path} is 3-D after Time selection. "
+                    "Set vertical_level in VARIABLES."
+                )
+            vertical_dim = arr.dims[0]
+            values = arr.isel({vertical_dim: vertical_level}).values.astype(float)
+        else:
+            raise ValueError(
+                f"{var_name} in {path} has unsupported dimensions after Time selection: "
+                f"{arr.dims}"
+            )
     return values
 
 
@@ -102,34 +175,50 @@ def domain_mean_ensemble_spread(fields: list[np.ndarray]) -> float:
     return float(np.nanmean(grid_spread))
 
 
+def spread_column(variable: dict) -> str:
+    suffix = variable["unit"].replace(" ", "_").replace("/", "_")
+    level = variable["vertical_level"]
+    level_part = "" if level is None else f"_lev{level}"
+    return f"{variable['name'].lower()}{level_part}_spread_{suffix}"
+
+
+def variable_label(variable: dict) -> str:
+    level = variable["vertical_level"]
+    if level is None:
+        return variable["name"]
+    return f"{variable['name']} level {level}"
+
+
 def calculate(base: Path, times: list[datetime]) -> pd.DataFrame:
     records = []
     for exp in EXPERIMENTS:
         for filt in FILTERS:
             print(f"Processing {exp}/{filt}")
             for t in times:
-                om_fields = []
-                psfc_fields = []
+                fields_by_metric = {spread_column(variable): [] for variable in VARIABLES}
                 for mem in MEMBERS:
                     fpath = find_member_file(base, exp, filt, mem, t)
-                    if exp in OCEAN_EXPERIMENTS:
-                        om_fields.append(read_om_tmp_surface(fpath))
-                    psfc_fields.append(read_psfc(fpath))
+                    for variable in VARIABLES:
+                        if exp not in variable["experiments"]:
+                            continue
+                        fields_by_metric[spread_column(variable)].append(
+                            read_variable_field(fpath, variable)
+                        )
 
-                records.append(
-                    {
-                        "time": wrf_time_name(t),
-                        "experiment": exp,
-                        "filter": filt,
-                        "om_tmp_spread_K": (
-                            domain_mean_ensemble_spread(om_fields)
-                            if exp in OCEAN_EXPERIMENTS
-                            else np.nan
-                        ),
-                        "psfc_spread_Pa": domain_mean_ensemble_spread(psfc_fields),
-                        "psfc_spread_hPa": domain_mean_ensemble_spread(psfc_fields) / 100.0,
-                    }
-                )
+                record = {
+                    "time": wrf_time_name(t),
+                    "experiment": exp,
+                    "filter": filt,
+                }
+                for variable in VARIABLES:
+                    column = spread_column(variable)
+                    fields = fields_by_metric[column]
+                    record[column] = (
+                        domain_mean_ensemble_spread(fields) * variable["scale"]
+                        if fields
+                        else np.nan
+                    )
+                records.append(record)
     return pd.DataFrame.from_records(records)
 
 
@@ -165,45 +254,33 @@ def plot_one(
     ax.legend(loc="best", frameon=False, fontsize=9)
     fig.autofmt_xdate()
     fig.tight_layout()
+    out_png.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_png, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
-def plot(df: pd.DataFrame, out_om_png: Path, out_psfc_png: Path) -> None:
-    plot_one(
-        df=df,
-        out_png=out_om_png,
-        metric="om_tmp_spread_K",
-        ylabel="Domain-mean ensemble spread of OM_TMP(0,0,:,:) (K)",
-        experiments=OCEAN_EXPERIMENTS,
-    )
-    plot_one(
-        df=df,
-        out_png=out_psfc_png,
-        metric="psfc_spread_hPa",
-        ylabel="Domain-mean ensemble spread of PSFC (hPa)",
-        experiments=EXPERIMENTS,
-    )
+def plot(df: pd.DataFrame) -> None:
+    for variable in VARIABLES:
+        plot_one(
+            df=df,
+            out_png=variable["out_png"],
+            metric=spread_column(variable),
+            ylabel=f"Domain-mean ensemble spread of {variable_label(variable)} ({variable['unit']})",
+            experiments=variable["experiments"],
+        )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--base", type=Path, default=DEFAULT_BASE)
-    parser.add_argument("--start", default="2018-09-10_00:00:00")
-    parser.add_argument("--end", default="2018-09-10_06:00:00")
-    parser.add_argument("--step-minutes", type=int, default=30)
-    parser.add_argument("--out-csv", type=Path, default=Path("./figs/spread_omtmp_psfc_timeseries.csv"))
-    parser.add_argument("--out-om-png", type=Path, default=Path("./figs/spread_omtmp_timeseries.png"))
-    parser.add_argument("--out-psfc-png", type=Path, default=Path("./figs/spread_psfc_timeseries.png"))
-    args = parser.parse_args()
+    times = build_times(START_TIME, END_TIME, STEP_MINUTES)
+    df = calculate(DEFAULT_BASE, times)
 
-    times = build_times(args.start, args.end, args.step_minutes)
-    df = calculate(args.base, times)
-    df.to_csv(args.out_csv, index=False)
-    plot(df, args.out_om_png, args.out_psfc_png)
-    print(f"Saved {args.out_csv}")
-    print(f"Saved {args.out_om_png}")
-    print(f"Saved {args.out_psfc_png}")
+    OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(OUT_CSV, index=False)
+    plot(df)
+
+    print(f"Saved {OUT_CSV}")
+    for variable in VARIABLES:
+        print(f"Saved {variable['out_png']}")
 
 
 if __name__ == "__main__":
