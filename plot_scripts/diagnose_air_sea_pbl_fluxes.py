@@ -59,6 +59,7 @@ dt = 1800.0  # s, 30 min
 
 strict_time_alignment = True
 strong_wind_thresholds = [10.0, 15.0]
+skip_initial_flux_time_in_plots = True
 
 required_vars = ["UST", "HFX", "QFX", "LANDMASK", "U10", "V10", "TSK", "T2", "PBLH"]
 
@@ -554,6 +555,29 @@ plot_vars = [
 ]
 
 
+flux_plot_columns = {
+    "UST_ocean_mean",
+    "tau_ocean_mean",
+    "HFX_ocean_mean",
+    "QFX_ocean_mean",
+    "LH_ocean_mean",
+    "HFX_cum",
+    "QFX_cum",
+    "LH_cum",
+}
+
+
+def dataframe_for_plot(df, columns):
+    """Optionally drop the first time only for flux/exchange time-series plots."""
+    if not skip_initial_flux_time_in_plots:
+        return df
+    if not set(columns).issubset(flux_plot_columns):
+        return df
+    if len(df) <= 1:
+        return df
+    return df.iloc[1:].copy()
+
+
 def plot_timeseries_by_assim(results):
     fig_dir = os.path.join(output_dir, "figures", "timeseries")
     colors = {"EXP1": "#0072BD", "EXP2": "#009E73", "EXP3": "#D0002E"}
@@ -562,7 +586,7 @@ def plot_timeseries_by_assim(results):
         for col, title, ylabel in plot_vars:
             fig, ax = plt.subplots(figsize=(10, 5))
             for exp_name in base_dirs:
-                df = results[exp_name][assim_method]
+                df = dataframe_for_plot(results[exp_name][assim_method], [col])
                 ax.plot(df["time"], df[col], marker="o", ms=3, lw=1.8, label=exp_name, color=colors.get(exp_name))
             ax.set_title(f"{assim_method}: {title}")
             ax.set_xlabel("Time")
@@ -583,7 +607,7 @@ def plot_timeseries_by_experiment(results):
         for col, title, ylabel in plot_vars:
             fig, ax = plt.subplots(figsize=(10, 5))
             for assim_method in assim_methods:
-                df = results[exp_name][assim_method]
+                df = dataframe_for_plot(results[exp_name][assim_method], [col])
                 ax.plot(df["time"], df[col], marker="o", ms=3, lw=1.8, label=assim_method, color=colors.get(assim_method))
             ax.set_title(f"{exp_name}: {title}")
             ax.set_xlabel("Time")
@@ -597,6 +621,7 @@ def plot_timeseries_by_experiment(results):
 
 
 def plot_diff_timeseries(diff_df, label, cols, outfile):
+    diff_df = dataframe_for_plot(diff_df, cols)
     fig, axes = plt.subplots(len(cols), 1, figsize=(10, 2.6 * len(cols)), sharex=True)
     if len(cols) == 1:
         axes = [axes]
