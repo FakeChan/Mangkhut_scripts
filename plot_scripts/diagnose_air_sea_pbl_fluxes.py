@@ -37,9 +37,18 @@ base_dirs = {
 }
 
 assim_methods = ["EAKF", "QCF_RHF"]
+members = ["006", "015", "029", "037", "043", "044"]
 
 # Change to "d02" if your files are named wrfout_d02_*.
 domain = "d01"
+
+# Nature-run files are used only to locate the typhoon center, then that center
+# is mapped to the ensemble-member grid. If nr_base is a file, the same file is
+# used for all times; if it is a directory, wrfout_{nr_domain}_YYYY-mm-dd_HH:MM:SS
+# is searched recursively.
+nr_base = "/path/to/NR_wrfout/"
+nr_domain = "d03"
+tc_radius_km = 150.0
 
 output_dir = "./air_sea_flux_analysis/"
 
@@ -52,8 +61,6 @@ strict_time_alignment = True
 strong_wind_thresholds = [10.0, 15.0]
 
 required_vars = ["UST", "HFX", "QFX", "LANDMASK", "U10", "V10", "TSK", "T2", "PBLH"]
-main_vars = ["UST", "HFX", "QFX"]
-optional_vars = ["U10", "V10", "TSK", "T2", "PBLH"]
 
 
 # =============================================================================
@@ -77,16 +84,60 @@ def warn(message):
     print(f"WARNING: {message}")
 
 
-def file_pattern(exp_name, assim_method):
-    return os.path.join(base_dirs[exp_name], assim_method, f"wrfout_{domain}_*")
+def member_file_pattern(exp_name, assim_method, member):
+    return os.path.join(base_dirs[exp_name], assim_method, member, f"wrfout_{domain}_*")
 
 
-def sorted_wrf_files(exp_name, assim_method):
-    pattern = file_pattern(exp_name, assim_method)
+def sorted_member_wrf_files(exp_name, assim_method, member):
+    pattern = member_file_pattern(exp_name, assim_method, member)
     files = sorted(glob.glob(pattern))
+    if not files:
+        recursive_pattern = os.path.join(base_dirs[exp_name], assim_method, member, "**", f"wrfout_{domain}_*")
+        files = sorted(glob.glob(recursive_pattern, recursive=True))
     if not files:
         raise FileNotFoundError(f"No wrfout files found: {pattern}")
     return files
+
+
+def parse_time_from_filename(path):
+    name = os.path.basename(path)
+    match = re.search(r"\d{4}-\d{2}-\d{2}_\d{2}:\d{2}:\d{2}", name)
+    if not match:
+        return None
+    return pd.to_datetime(match.group(0).replace("_", " "))
+
+
+def build_member_file_maps(exp_name, assim_method):
+    maps = {}
+    for member in members:
+        member_map = {}
+        for path in sorted_member_wrf_files(exp_name, assim_method, member):
+            file_time = parse_time_from_filename(path)
+            if file_time is None:
+                with xr.open_dataset(path, decode_times=False, mask_and_scale=True) as ds:
+                    file_time = parse_wrf_time(ds, path)
+            if file_time in member_map:
+                warn(f"Duplicate time {file_time} for {exp_name}/{assim_method}/{member}; using {path}")
+            member_map[file_time] = path
+        maps[member] = member_map
+
+    common_times = None
+    for member, member_map in maps.items():
+        times = set(member_map)
+        common_times = times if common_times is None else common_times & times
+        if not times:
+            raise FileNotFoundError(f"No usable wrfout times found for {exp_name}/{assim_method}/{member}")
+
+    all_times = sorted(common_times)
+    if not all_times:
+        raise ValueError(f"No common wrfout times across members for {exp_name}/{assim_method}")
+
+    for member, member_map in maps.items():
+        missing = sorted(set().union(*[set(m) for m in maps.values()]) - set(member_map))
+        if missing:
+            warn(f"{exp_name}/{assim_method}/{member} is missing {len(missing)} times; ensemble mean uses common times only.")
+
+    return maps, all_times
 
 
 def parse_wrf_time(ds, file_path):
@@ -143,6 +194,100 @@ def first_2d_array(ds, var_name, file_path, required=False):
     return arr
 
 
+def read_lat_lon(ds, file_path):
+    if "XLAT" not in ds.variables or "XLONG" not in ds.variables:
+        raise KeyError(f"XLAT/XLONG not found in {file_path}")
+    lats = first_2d_array(ds, "XLAT", file_path, required=True)
+    lons = first_2d_array(ds, "XLONG", file_path, required=True)
+    return lats, lons
+
+
+def find_nr_file(time):
+    time_name = pd.to_datetime(time).strftime("%Y-%m-%d_%H:%M:%S")
+    if os.path.isfile(nr_base):
+        return nr_base
+    pattern = os.path.join(nr_base, "**", f"wrfout_{nr_domain}_{time_name}*")
+    matches = sorted(glob.glob(pattern, recursive=True))
+    if not matches:
+        raise FileNotFoundError(f"No NR file matching wrfout_{nr_domain}_{time_name}* under {nr_base}")
+    return matches[0]
+
+
+def pressure_like_field(ds, file_path):
+    for name in ["SLP", "slp", "PSFC", "PMSL"]:
+        if name in ds.variables:
+            return first_2d_array(ds, name, file_path, required=True), name
+
+    try:
+        from wrf import getvar, to_np
+        import netCDF4
+    except Exception as exc:
+        raise KeyError(
+            f"No SLP/slp/PSFC/PMSL variable found in {file_path}, and wrf-python is not available "
+            "to diagnose sea-level pressure."
+        ) from exc
+
+    with netCDF4.Dataset(file_path) as nc:
+        return np.asarray(to_np(getvar(nc, "slp", timeidx=0)), dtype=float), "wrf-python slp"
+
+
+def nr_typhoon_center_lat_lon(time):
+    nr_file = find_nr_file(time)
+    with xr.open_dataset(nr_file, decode_times=False, mask_and_scale=True) as ds:
+        pressure, pressure_name = pressure_like_field(ds, nr_file)
+        lats, lons = read_lat_lon(ds, nr_file)
+
+    if pressure.shape != lats.shape:
+        raise ValueError(f"NR pressure shape {pressure.shape} does not match XLAT shape {lats.shape}: {nr_file}")
+
+    min_idx = np.unravel_index(np.nanargmin(pressure), pressure.shape)
+    center_lat = float(lats[min_idx])
+    center_lon = float(lons[min_idx])
+    min_pressure = float(pressure[min_idx])
+    print(
+        f"NR TC center at {pd.to_datetime(time)} from {os.path.basename(nr_file)} "
+        f"using {pressure_name}: lat={center_lat:.4f}, lon={center_lon:.4f}, pmin={min_pressure:.2f}"
+    )
+    return center_lat, center_lon, nr_file
+
+
+def latlon_distance_km(lats, lons, center_lat, center_lon):
+    radius_earth_km = 6371.0
+    lat1 = np.deg2rad(lats)
+    lon1 = np.deg2rad(lons)
+    lat2 = np.deg2rad(center_lat)
+    lon2 = np.deg2rad(center_lon)
+    dlat = lat1 - lat2
+    dlon = lon1 - lon2
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
+    return 2.0 * radius_earth_km * np.arcsin(np.sqrt(a))
+
+
+def tc_region_mask_from_nr(time, member_lats, member_lons):
+    center_lat, center_lon, nr_file = nr_typhoon_center_lat_lon(time)
+    dist_sq = (member_lats - center_lat) ** 2 + (member_lons - center_lon) ** 2
+    center_j, center_i = np.unravel_index(np.nanargmin(dist_sq), dist_sq.shape)
+    distances = latlon_distance_km(member_lats, member_lons, center_lat, center_lon)
+    mask = distances <= tc_radius_km
+    if not np.any(mask):
+        raise ValueError(
+            f"No member grid points found within tc_radius_km={tc_radius_km:g} of NR TC center "
+            f"for {time}; NR={nr_file}"
+        )
+    print(
+        f"Mapped NR TC center to member grid for {pd.to_datetime(time)}: "
+        f"i={center_i}, j={center_j}, radius={tc_radius_km:g} km, points={int(mask.sum())}"
+    )
+    return mask
+
+
+def ensemble_nanmean(arrays):
+    valid_arrays = [arr for arr in arrays if arr is not None]
+    if not valid_arrays:
+        return None
+    return np.nanmean(np.stack(valid_arrays, axis=0), axis=0)
+
+
 def nanmean_masked(arr, mask):
     if arr is None:
         return np.nan
@@ -172,22 +317,40 @@ def safe_name_time(t):
 # =============================================================================
 
 def read_one_experiment(exp_name, assim_method):
-    files = sorted_wrf_files(exp_name, assim_method)
+    member_maps, times = build_member_file_maps(exp_name, assim_method)
     rows = []
     fields_by_time = defaultdict(dict)
 
-    for i_file, path in enumerate(files):
-        print(f"Reading {exp_name}/{assim_method}: {i_file + 1}/{len(files)} {os.path.basename(path)}")
-        with xr.open_dataset(path, decode_times=False, mask_and_scale=True) as ds:
-            time = parse_wrf_time(ds, path)
+    for i_time, time in enumerate(times):
+        print(f"Reading {exp_name}/{assim_method}: time {i_time + 1}/{len(times)} {pd.to_datetime(time)}")
 
-            arrays = {}
-            for var in required_vars:
-                arrays[var] = first_2d_array(ds, var, path, required=(var in ["UST", "HFX", "QFX", "LANDMASK"]))
+        member_arrays = {var: [] for var in required_vars}
+        member_lats = None
+        member_lons = None
 
-        ocean_mask = arrays["LANDMASK"] == 0
+        for member in members:
+            path = member_maps[member][time]
+            print(f"  member {member}: {os.path.basename(path)}")
+            with xr.open_dataset(path, decode_times=False, mask_and_scale=True) as ds:
+                for var in required_vars:
+                    arr = first_2d_array(ds, var, path, required=(var in ["UST", "HFX", "QFX", "LANDMASK"]))
+                    member_arrays[var].append(arr)
+                if member_lats is None or member_lons is None:
+                    member_lats, member_lons = read_lat_lon(ds, path)
+
+        arrays = {var: ensemble_nanmean(values) for var, values in member_arrays.items()}
+        ocean_mask = arrays["LANDMASK"] < 0.5
+        tc_region_mask = tc_region_mask_from_nr(time, member_lats, member_lons)
+        analysis_mask = ocean_mask & tc_region_mask
+        if not np.any(analysis_mask):
+            warn(
+                f"No ocean grid points found inside TC region for {exp_name}/{assim_method} at {time}; "
+                "falling back to TC region without LANDMASK."
+            )
+            analysis_mask = tc_region_mask
+
         if not np.any(ocean_mask):
-            warn(f"No ocean grid points found with LANDMASK == 0 in {path}")
+            warn(f"No ocean grid points found with LANDMASK == 0 for {exp_name}/{assim_method} at {time}")
 
         if arrays["U10"] is not None and arrays["V10"] is not None:
             wspd10 = np.sqrt(arrays["U10"] ** 2 + arrays["V10"] ** 2)
@@ -201,25 +364,28 @@ def read_one_experiment(exp_name, assim_method):
             "time": time,
             "experiment": exp_name,
             "assim_method": assim_method,
-            "UST_ocean_mean": nanmean_masked(arrays["UST"], ocean_mask),
-            "tau_ocean_mean": nanmean_masked(tau, ocean_mask),
-            "HFX_ocean_mean": nanmean_masked(arrays["HFX"], ocean_mask),
-            "QFX_ocean_mean": nanmean_masked(arrays["QFX"], ocean_mask),
-            "LH_ocean_mean": nanmean_masked(lh, ocean_mask),
-            "PBLH_ocean_mean": nanmean_masked(arrays["PBLH"], ocean_mask),
-            "TSK_ocean_mean": nanmean_masked(arrays["TSK"], ocean_mask),
-            "T2_ocean_mean": nanmean_masked(arrays["T2"], ocean_mask),
+            "ensemble_members": len(members),
+            "tc_region_points": int(tc_region_mask.sum()),
+            "tc_ocean_points": int(analysis_mask.sum()),
+            "UST_ocean_mean": nanmean_masked(arrays["UST"], analysis_mask),
+            "tau_ocean_mean": nanmean_masked(tau, analysis_mask),
+            "HFX_ocean_mean": nanmean_masked(arrays["HFX"], analysis_mask),
+            "QFX_ocean_mean": nanmean_masked(arrays["QFX"], analysis_mask),
+            "LH_ocean_mean": nanmean_masked(lh, analysis_mask),
+            "PBLH_ocean_mean": nanmean_masked(arrays["PBLH"], analysis_mask),
+            "TSK_ocean_mean": nanmean_masked(arrays["TSK"], analysis_mask),
+            "T2_ocean_mean": nanmean_masked(arrays["T2"], analysis_mask),
         }
 
         for threshold in strong_wind_thresholds:
             suffix = f"wind{int(threshold)}"
             if wspd10 is None:
                 wind_mask = np.zeros_like(ocean_mask, dtype=bool)
-                warn(f"Cannot calculate WSPD10 > {threshold:g} m/s for {path}; U10/V10 missing.")
+                warn(f"Cannot calculate WSPD10 > {threshold:g} m/s for {exp_name}/{assim_method} at {time}; U10/V10 missing.")
             else:
-                wind_mask = ocean_mask & (wspd10 > threshold)
+                wind_mask = analysis_mask & (wspd10 > threshold)
                 if not np.any(wind_mask):
-                    warn(f"No ocean grid points satisfy WSPD10 > {threshold:g} m/s in {path}")
+                    warn(f"No TC-ocean grid points satisfy WSPD10 > {threshold:g} m/s for {exp_name}/{assim_method} at {time}")
             row[f"UST_{suffix}_mean"] = nanmean_masked(arrays["UST"], wind_mask)
             row[f"tau_{suffix}_mean"] = nanmean_masked(tau, wind_mask)
             row[f"HFX_{suffix}_mean"] = nanmean_masked(arrays["HFX"], wind_mask)
@@ -228,15 +394,17 @@ def read_one_experiment(exp_name, assim_method):
 
         rows.append(row)
 
-        fields_by_time[time]["UST"] = arrays["UST"]
-        fields_by_time[time]["tau"] = tau
-        fields_by_time[time]["HFX"] = arrays["HFX"]
-        fields_by_time[time]["QFX"] = arrays["QFX"]
-        fields_by_time[time]["LH"] = lh
-        fields_by_time[time]["TSK"] = arrays["TSK"]
-        fields_by_time[time]["T2"] = arrays["T2"]
-        fields_by_time[time]["PBLH"] = arrays["PBLH"]
+        spatial_plot_mask = np.where(analysis_mask, 1.0, np.nan)
+        fields_by_time[time]["UST"] = arrays["UST"] * spatial_plot_mask
+        fields_by_time[time]["tau"] = tau * spatial_plot_mask
+        fields_by_time[time]["HFX"] = arrays["HFX"] * spatial_plot_mask
+        fields_by_time[time]["QFX"] = arrays["QFX"] * spatial_plot_mask
+        fields_by_time[time]["LH"] = lh * spatial_plot_mask
+        fields_by_time[time]["TSK"] = arrays["TSK"] * spatial_plot_mask if arrays["TSK"] is not None else None
+        fields_by_time[time]["T2"] = arrays["T2"] * spatial_plot_mask if arrays["T2"] is not None else None
+        fields_by_time[time]["PBLH"] = arrays["PBLH"] * spatial_plot_mask if arrays["PBLH"] is not None else None
         fields_by_time[time]["LANDMASK"] = arrays["LANDMASK"]
+        fields_by_time[time]["TC_REGION_MASK"] = tc_region_mask
 
     df = pd.DataFrame(rows).sort_values("time").reset_index(drop=True)
     for base_col in ["HFX_ocean_mean", "QFX_ocean_mean", "LH_ocean_mean"]:
