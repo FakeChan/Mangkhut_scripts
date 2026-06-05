@@ -26,7 +26,7 @@ BASE_DIR = Path("/scratch/lililei1/kcfu/tc_mangkhut/cycle_test")
 NR_BASE = Path("/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout")
 MEMBER_DOMAIN = "d02"
 NR_DOMAIN = "d03"
-START_TIME = "2018-09-10_00:00:00"
+START_TIME = "2018-09-10_00:30:00"
 END_TIME = "2018-09-10_06:00:00"
 STEP_MINUTES = 30
 NR_COARSEN_FACTOR = 5
@@ -46,30 +46,30 @@ MEMBERS = ["006", "015", "029", "037", "043", "044"]
 #     mass-grid variables: XLAT/XLONG
 #     U-staggered variables: XLAT_U/XLONG_U
 #     V-staggered variables: XLAT_V/XLONG_V
-TARGET_VARIABLE = {
-    "name": "OM_TMP",
-    "vertical_level": 0,
-    "scale": 1.0,
-    "unit": "K",
-    "experiments": ["6mem_oceanAssim0Run1", "6mem_oceanAssim1Run1"],
-    "lat_name": None,
-    "lon_name": None,
-    "out_csv": Path("./figs/omtmp_rmse_vs_nr_timeseries.csv"),
-    "out_png": Path("./figs/omtmp_rmse_vs_nr_timeseries.png"),
-}
-
-# Example for a 2-D variable:
 # TARGET_VARIABLE = {
-#     "name": "PSFC",
-#     "vertical_level": None,
-#     "scale": 0.01,
-#     "unit": "hPa",
-#     "experiments": EXPERIMENTS,
+#     "name": "OM_TMP",
+#     "vertical_level": 0,
+#     "scale": 1.0,
+#     "unit": "K",
+#     "experiments": ["6mem_oceanAssim0Run1", "6mem_oceanAssim1Run1"],
 #     "lat_name": None,
 #     "lon_name": None,
-#     "out_csv": Path("./figs/psfc_rmse_vs_nr_timeseries.csv"),
-#     "out_png": Path("./figs/psfc_rmse_vs_nr_timeseries.png"),
+#     "out_csv": Path("./figs/omtmp_rmse_vs_nr_timeseries.csv"),
+#     "out_png": Path("./figs/omtmp_rmse_vs_nr_timeseries.png"),
 # }
+
+# Example for a 2-D variable:
+TARGET_VARIABLE = {
+    "name": "UST",
+    "vertical_level": None,
+    "scale": 1,
+    "unit": " ",
+    "experiments": EXPERIMENTS,
+    "lat_name": None,
+    "lon_name": None,
+    "out_csv": Path("./figs/ust_rmse_timeseries.csv"),
+    "out_png": Path("./figs/ust_rmse_timeseries.png"),
+}
 #
 # Example for a 3-D atmospheric variable:
 # TARGET_VARIABLE = {

@@ -31,26 +31,26 @@ import xarray as xr
 # =============================================================================
 
 base_dirs = {
-    "EXP1": "/path/to/exp1/",
-    "EXP2": "/path/to/exp2/",
-    "EXP3": "/path/to/exp3/",
+    "EXP1": "/scratch/lililei1/kcfu/tc_mangkhut/cycle_test/6mem_oceanAssim0Run0",
+    "EXP2": "/scratch/lililei1/kcfu/tc_mangkhut/cycle_test/6mem_oceanAssim0Run1",
+    "EXP3": "/scratch/lililei1/kcfu/tc_mangkhut/cycle_test/6mem_oceanAssim1Run1",
 }
 
 assim_methods = ["EAKF", "QCF_RHF"]
 members = ["006", "015", "029", "037", "043", "044"]
 
 # Change to "d02" if your files are named wrfout_d02_*.
-domain = "d01"
+domain = "d02"
 
 # Nature-run files are used only to locate the typhoon center, then that center
 # is mapped to the ensemble-member grid. If nr_base is a file, the same file is
 # used for all times; if it is a directory, wrfout_{nr_domain}_YYYY-mm-dd_HH:MM:SS
 # is searched recursively.
-nr_base = "/path/to/NR_wrfout/"
+nr_base = "/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/"
 nr_domain = "d03"
 tc_radius_km = 150.0
 
-output_dir = "./air_sea_flux_analysis/"
+output_dir = "./figs/pbl_flux_anal/"
 
 # Physical constants and output interval.
 Lv = 2.5e6  # J kg-1
