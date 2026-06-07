@@ -42,6 +42,8 @@ MEMBERS = ["006", "015", "029", "037", "043", "044"]
 #     int  -> variable must be 3-D after selecting Time, e.g. U(Time,z,y,x).
 #
 # scale converts both member and NR values before RMSE is computed.
+# power applies an optional exponent after scaling, e.g. power=2.0 makes UST
+# become UST**2 before interpolation/RMSE.
 # lat_name/lon_name may be None for automatic WRF coordinate selection:
 #     mass-grid variables: XLAT/XLONG
 #     U-staggered variables: XLAT_U/XLONG_U
@@ -62,13 +64,14 @@ MEMBERS = ["006", "015", "029", "037", "043", "044"]
 TARGET_VARIABLE = {
     "name": "UST",
     "vertical_level": None,
-    "scale": 1,
-    "unit": " ",
+    "scale": 1.0,
+    "power": 2.0,
+    "unit": "m2 s-2",
     "experiments": EXPERIMENTS,
     "lat_name": None,
     "lon_name": None,
-    "out_csv": Path("./figs/ust_rmse_timeseries.csv"),
-    "out_png": Path("./figs/ust_rmse_timeseries.png"),
+    "out_csv": Path("./figs/ust2_rmse_timeseries.csv"),
+    "out_png": Path("./figs/ust2_rmse_timeseries.png"),
 }
 #
 # Example for a 3-D atmospheric variable:
@@ -190,11 +193,12 @@ def read_variable_2d(ds: xr.Dataset, variable: dict) -> xr.DataArray:
     raise ValueError(f"{name} has unsupported dimensions after Time selection: {data.dims}")
 
 
-def variable_signature(variable: dict) -> tuple[str, int | None, float, str | None, str | None]:
+def variable_signature(variable: dict) -> tuple[str, int | None, float, float, str | None, str | None]:
     return (
         variable["name"],
         variable["vertical_level"],
         variable["scale"],
+        variable.get("power", 1.0),
         variable["lat_name"],
         variable["lon_name"],
     )
@@ -204,6 +208,7 @@ def variable_from_signature(
     name: str,
     vertical_level: int | None,
     scale: float,
+    power: float,
     lat_name: str | None,
     lon_name: str | None,
 ) -> dict:
@@ -211,6 +216,7 @@ def variable_from_signature(
         "name": name,
         "vertical_level": vertical_level,
         "scale": scale,
+        "power": power,
         "lat_name": lat_name,
         "lon_name": lon_name,
     }
@@ -222,15 +228,16 @@ def read_field_and_grid_cached(
     name: str,
     vertical_level: int | None,
     scale: float,
+    power: float,
     lat_name: str | None,
     lon_name: str | None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     path = Path(path_str)
-    variable = variable_from_signature(name, vertical_level, scale, lat_name, lon_name)
+    variable = variable_from_signature(name, vertical_level, scale, power, lat_name, lon_name)
     with xr.open_dataset(path, decode_times=False) as ds:
         data = read_variable_2d(ds, variable)
         lats, lons = read_lat_lon(ds, data, variable)
-        values = data.values.astype(float) * scale
+        values = (data.values.astype(float) * scale) ** power
     return lats, lons, values
 
 
@@ -251,6 +258,7 @@ def build_nr_interpolator_cached(
     name: str,
     vertical_level: int | None,
     scale: float,
+    power: float,
     lat_name: str | None,
     lon_name: str | None,
     coarsen_factor: int,
@@ -260,6 +268,7 @@ def build_nr_interpolator_cached(
         name,
         vertical_level,
         scale,
+        power,
         lat_name,
         lon_name,
     )
