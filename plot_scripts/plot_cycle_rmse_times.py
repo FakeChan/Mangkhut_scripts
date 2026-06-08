@@ -43,7 +43,8 @@ MEMBERS = ["006", "015", "029", "037", "043", "044"]
 #
 # scale converts both member and NR values before RMSE is computed.
 # power applies an optional exponent after scaling, e.g. power=2.0 makes UST
-# become UST**2 before interpolation/RMSE.
+# become UST**2 before interpolation/RMSE. 
+# e.g. UST ==( UST * scale ) **power
 # lat_name/lon_name may be None for automatic WRF coordinate selection:
 #     mass-grid variables: XLAT/XLONG
 #     U-staggered variables: XLAT_U/XLONG_U
@@ -62,16 +63,16 @@ MEMBERS = ["006", "015", "029", "037", "043", "044"]
 
 # Example for a 2-D variable:
 TARGET_VARIABLE = {
-    "name": "UST",
+    "name": "MU",
     "vertical_level": None,
-    "scale": 1.0,
-    "power": 2.0,
-    "unit": "m2 s-2",
+    "scale": 1,
+    "power": 1.0,
+    "unit": "hPa",
     "experiments": EXPERIMENTS,
     "lat_name": None,
     "lon_name": None,
-    "out_csv": Path("./figs/ust2_rmse_timeseries.csv"),
-    "out_png": Path("./figs/ust2_rmse_timeseries.png"),
+    "out_csv": Path("./figs/mu_rmse_timeseries.csv"),
+    "out_png": Path("./figs/mu_rmse_timeseries.png"),
 }
 #
 # Example for a 3-D atmospheric variable:

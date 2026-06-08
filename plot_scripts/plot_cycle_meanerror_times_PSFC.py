@@ -239,7 +239,7 @@ def plot(df: pd.DataFrame, out_png: Path, metric: str) -> None:
                 dash_capstyle="butt",
             )
 
-    ax.axhline(0.0, color="0.35", linewidth=0.8)
+    # ax.axhline(0.0, color="0.35", linewidth=0.8)
     ax.set_xlabel("Forecast time")
     ax.set_ylabel(label_map[metric])
     ax.grid(True, linestyle=":", linewidth=0.8, alpha=0.7)
