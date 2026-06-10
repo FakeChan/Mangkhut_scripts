@@ -16,8 +16,23 @@ time_min=getenv('obs_min')
 npoint=str2num(getenv('npoint'))
 % time='10_00:00';
 time=strcat(time_day,'_',time_hour,':',time_min)
+lacc_mode=getenv('lacc_mode');
+if strcmp(lacc_mode,'1')
+    center_day=getenv('lacc_center_day');
+    center_hour=getenv('lacc_center_hour');
+    center_min=getenv('lacc_center_min');
+else
+    center_day=time_day;
+    center_hour=time_hour;
+    center_min=time_min;
+end
+if isempty(center_day); center_day=time_day; end
+if isempty(center_hour); center_hour=time_hour; end
+if isempty(center_min); center_min=time_min; end
+center_time=strcat(center_day,'_',center_hour,':',center_min)
 wrfdir=getenv('NR_wrfout_dir');
 wrf_fname = ['wrfout_d03_2018-09-' time ':00'];
+center_wrf_fname = ['wrfout_d03_2018-09-' center_time ':00'];
 radius=(sqrt(npoint)/2-1); % a square of (2*radius+2)^2
 delta_x=300;
 delta=7500/delta_x;
@@ -40,7 +55,7 @@ delta=7500/delta_x;
 % jloc=jlist(tloc)+1;
 
 %now use function find_typhoon_center
-wrffile=strcat(wrfdir,wrf_fname)
+wrffile=strcat(wrfdir,center_wrf_fname)
 [center_lat, center_lon, min_mslp_val, iloc, jloc] = find_typhoon_center(wrffile, 1)
 
 %=============================================
@@ -216,8 +231,6 @@ for yloc=jloc-radius*delta:delta:jloc+(radius+1)*delta
     end
 end
     % work on MW
-
-
 
 
 

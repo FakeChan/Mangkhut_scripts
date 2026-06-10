@@ -31,6 +31,7 @@ export i_parent_start=27 #same as namelist, used in matlab code to get profile
 export j_parent_start=88
 #export rttov_scatt=0 # 0: simple cloud scheme, 1: rttov_scatt
 export use_total_ice=0 #0: seperately calculate scatt effect of Snow and Ice; 1: use total ice
+export lacc_mode=0
 #==============================
 #set obs time
 if [ ! -z "${cycle_flag}" ]; then  #this script is used in cycling DA

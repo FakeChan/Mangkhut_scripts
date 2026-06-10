@@ -23,6 +23,20 @@ cycle_flag=getenv('cycle_flag')
 wrfdir=getenv('ens_mem_dir');
 % time='10_00:00';
 time=strcat(time_day,'_',time_hour,':',time_min)
+lacc_mode=getenv('lacc_mode');
+if strcmp(lacc_mode,'1')
+    center_day=getenv('lacc_center_day');
+    center_hour=getenv('lacc_center_hour');
+    center_min=getenv('lacc_center_min');
+else
+    center_day=time_day;
+    center_hour=time_hour;
+    center_min=time_min;
+end
+if isempty(center_day); center_day=time_day; end
+if isempty(center_hour); center_hour=time_hour; end
+if isempty(center_min); center_min=time_min; end
+center_time=strcat(center_day,'_',center_hour,':',center_min)
 if strcmp(cycle_flag,'1')
     if strcmp(wrf_name_flag,'1')
         wrf_fname=['wrfout_d01_2018-09-' time ':00']
@@ -42,7 +56,7 @@ delta_x=7500;
 %update in 2025.2.21
 work_dir=getenv('prof_mem_dir');
 NR_location='/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/'
-NR_fname=['wrfout_d03_2018-09-' time ':00']
+NR_fname=['wrfout_d03_2018-09-' center_time ':00']
 
 ens_fname=strcat(wrfdir,'/',wrf_fname) 
 % ilist=readmatrix(strcat(NR_location,'/','NR_d02_ilist.txt'));
@@ -241,8 +255,6 @@ for yloc=jloc-radius*delta:delta:jloc+(radius+1)*delta
     end
 end
     % work on MW
-
-
 
 
 

@@ -26,10 +26,11 @@ fi
 export domain=d01
 
 export npoint=676
-export nlevels=57
+export nlevels=56
 export obserr_std=${obs_err_std:-0.5}
 export rttov_scatt=0 # 0 simple cloud scheme; 1 RTTOV-SCATT
 export use_total_ice=0 #0: seperately calculate scatt effect of Snow and Ice; 1: use total ice
+export lacc_mode=0
 #==============================
 #set obs time
 if [ ! -z "${cycle_flag}" ]; then  #this script is used in cycling DA
