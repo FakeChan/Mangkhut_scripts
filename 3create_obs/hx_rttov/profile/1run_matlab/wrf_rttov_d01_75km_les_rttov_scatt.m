@@ -33,10 +33,16 @@ if isempty(center_hour); center_hour=time_hour; end
 if isempty(center_min); center_min=time_min; end
 center_time=strcat(center_day,'_',center_hour,':',center_min)
 wrfdir=getenv('NR_wrfout_dir');
-wrf_fname = ['wrfout_d03_2018-09-' time ':00'];
-center_wrf_fname = ['wrfout_d03_2018-09-' center_time ':00'];
+if strcmp(lacc_mode,'1')
+    wrf_domain='d02';
+    delta_x=1500;
+else
+    wrf_domain='d03';
+    delta_x=300;
+end
+wrf_fname = ['wrfout_' wrf_domain '_2018-09-' time ':00'];
+center_wrf_fname = ['wrfout_' wrf_domain '_2018-09-' center_time ':00'];
 radius=(sqrt(npoint)/2-1); % a square of (2*radius+2)^2
-delta_x=300;
 delta=7500/delta_x;
 
 %wrfdir = '/share/home/lililei1/lfzhou/hyperspectral_da/step1_obs_ensBT/step2_les_obs/0les_nr/';
@@ -57,12 +63,7 @@ delta=7500/delta_x;
 % jloc=jlist(tloc)+1;
 
 wrffile=strcat(wrfdir,center_wrf_fname)
-target_wrffile=strcat(wrfdir,wrf_fname)
-if strcmp(lacc_mode,'1')
-    [center_lat, center_lon, min_mslp_val, iloc, jloc] = match_typhoon_center_to_grid(wrffile, target_wrffile)
-else
-    [center_lat, center_lon, min_mslp_val, iloc, jloc] = find_typhoon_center(wrffile, 1)
-end
+[center_lat, center_lon, min_mslp_val, iloc, jloc] = find_typhoon_center(wrffile, 1)
 
 %=============================================
 % wrfdir='/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/';
@@ -305,6 +306,5 @@ for yloc=jloc-radius*delta:delta:jloc+(radius+1)*delta
     end
 end
     % work on MW
-
 
 
