@@ -54,9 +54,13 @@ delta=7500/delta_x;
 % iloc=ilist(tloc)+1;
 % jloc=jlist(tloc)+1;
 
-%now use function find_typhoon_center
 wrffile=strcat(wrfdir,center_wrf_fname)
-[center_lat, center_lon, min_mslp_val, iloc, jloc] = find_typhoon_center(wrffile, 1)
+target_wrffile=strcat(wrfdir,wrf_fname)
+if strcmp(lacc_mode,'1')
+    [center_lat, center_lon, min_mslp_val, iloc, jloc] = match_typhoon_center_to_grid(wrffile, target_wrffile)
+else
+    [center_lat, center_lon, min_mslp_val, iloc, jloc] = find_typhoon_center(wrffile, 1)
+end
 
 %=============================================
 % wrfdir='/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/';
@@ -231,7 +235,6 @@ for yloc=jloc-radius*delta:delta:jloc+(radius+1)*delta
     end
 end
     % work on MW
-
 
 
 
