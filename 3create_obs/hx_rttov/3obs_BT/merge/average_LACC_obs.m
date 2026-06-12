@@ -55,28 +55,32 @@ end
 
 for chnumi = 1:chnum
     bt_sum = zeros(point, point);
+    bt_withpert_sum = zeros(point, point);
+    randn('state', chnumi);
     for it = 1:length(lacc_times)
         in_dir = [base_dir 'BT_' lacc_times{it} '/'];
         in_file = [in_dir 'obs_' domain '_ch' num2str(chnumi) '.txt'];
         if ~exist(in_file, 'file')
             error('Missing LACC input file: %s', in_file);
         end
-        bt_sum = bt_sum + load(in_file);
+        bt_lag = load(in_file);
+        bt_sum = bt_sum + bt_lag;
+
+        rand = randn(point, point);
+        obs_rand = obserr_std * (rand - mean(mean(rand)));
+        bt_withpert_sum = bt_withpert_sum + bt_lag + obs_rand;
     end
 
     bt_mean = bt_sum ./ length(lacc_times);
     bt_1d = reshape(bt_mean, point * point, 1);
+    bt_withpert_mean = bt_withpert_sum ./ length(lacc_times);
 
     dlmwrite([out_dir 'obs_' domain '_ch' num2str(chnumi) '.txt'], ...
         bt_mean, 'precision', '%.4f', 'delimiter', '\t');
     dlmwrite([out_dir 'obs_' domain '_ch' num2str(chnumi) '_totalline.txt'], ...
         bt_1d, 'precision', '%.4f', 'delimiter', '\t');
 
-    randn('state', chnumi);
-    rand = randn(point, point);
-    obs_rand = obserr_std * (rand - mean(mean(rand)));
-    bt_withpert = bt_mean + obs_rand;
-    bt_withpert_1d = reshape(bt_withpert, point * point, 1);
+    bt_withpert_1d = reshape(bt_withpert_mean, point * point, 1);
     dlmwrite([out_dir 'obs_' domain '_ch' num2str(chnumi) '_totalline_withpert.txt'], ...
         bt_withpert_1d, 'precision', '%.4f', 'delimiter', '\t');
 
