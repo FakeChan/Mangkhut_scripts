@@ -16,6 +16,7 @@ time_min=getenv('obs_min')
 npoint=str2num(getenv('npoint'))
 rttov_scatt=getenv('rttov_scatt')
 use_total_ice=getenv('use_total_ice')
+clear_sky_mode=strcmp(rttov_scatt,'0');
 % time='10_00:00';
 time=strcat(time_day,'_',time_hour,':',time_min)
 lacc_mode=getenv('lacc_mode');
@@ -101,6 +102,12 @@ catch
     p_top = 5000; % 如果读取失败，根据你的 namelist 设置默认值 (例如 50hPa -> 5000Pa)
     disp('Warning: P_TOP not found, using default 5000 Pa');
 end
+if clear_sky_mode
+    geopot=squeeze(wrfd01.data('PH')) + squeeze(wrfd01.data('PHB'));
+    clear_sky_mask=zeros(npoint,1);
+    hydrometeor_path=zeros(npoint,1);
+    clear_sky_thresh=0.01; % kg m^-2 for RWP + SWP + GWP
+end
 
 
 %%set up ozone profile
@@ -126,8 +133,10 @@ filename=[work_dir '/prof' time '.dat']
 %   for  xloc=38:125:3163
 %   for  yloc=38:125:3163
 
+obs_index=0;
 for yloc=jloc-radius*delta:delta:jloc+(radius+1)*delta
     for xloc=iloc-radius*delta:delta:iloc+(radius+1)*delta
+            obs_index=obs_index+1;
             if xloc<0 || yloc<0
                 error('xloc or yloc invalid')
             end
@@ -143,6 +152,11 @@ for yloc=jloc-radius*delta:delta:jloc+(radius+1)*delta
             qsnow_prof  = interp_prof(qsnow,xloc,yloc,'QSNOW');
             qrain_prof  = interp_prof(qrain,xloc,yloc,'QRAIN');
             qgraup_prof = interp_prof(qgraup,xloc,yloc,'QGRAUP');
+            if clear_sky_mode
+                geopot_prof = interp_prof(geopot,xloc,yloc,'PH_PLUS_PHB');
+                height_prof = geopot_prof / 9.8;
+                dz_prof = abs(diff(height_prof));
+            end
             % 2. 计算界面气压 (PH / Half-level Pressure)
             % MU 是 2D (y,x)，ZNW 是 1D (nz+1)
             mu_point  = interp_point(mu, xloc, yloc, 'MU');
@@ -200,6 +214,16 @@ for yloc=jloc-radius*delta:delta:jloc+(radius+1)*delta
                     fprintf(fid, '%.4f %.4f %.4f %.4e %.4f %.4e %.4e %.4e %.4e \r\n', ...
                         p_hpa, ph_hpa, tk_val, q_val, cc_val, clw_val, qice_val, rain_val, FrozenPrecip_val);
                 end
+            end
+            if clear_sky_mode
+                tk_prof_for_mask = zeros(1,nz);
+                for kk=1:nz
+                    tk_prof_for_mask(kk) = wrf_tk(t_prof_raw(kk), pres_prof(kk));
+                end
+                hydro_mix = max(0,qrain_prof) + max(0,qsnow_prof) + max(0,qgraup_prof);
+                rho_prof = pres_prof ./ (287.05 .* tk_prof_for_mask .* (1.0 + 0.61 .* qvapor_prof));
+                hydrometeor_path(obs_index) = sum(rho_prof(:) .* hydro_mix(:) .* dz_prof(:));
+                clear_sky_mask(obs_index) = hydrometeor_path(obs_index) < clear_sky_thresh;
             end
             
             % === [End] Modified Section ===
@@ -305,6 +329,12 @@ for yloc=jloc-radius*delta:delta:jloc+(radius+1)*delta
 
     end
 end
+if clear_sky_mode
+    clear_sky_mask_file=[work_dir '/clear_sky_mask_' time '.txt'];
+    hydrometeor_path_file=[work_dir '/hydrometeor_path_' time '.txt'];
+    dlmwrite(clear_sky_mask_file, clear_sky_mask, 'precision', '%d', 'delimiter', '\t');
+    dlmwrite(hydrometeor_path_file, hydrometeor_path, 'precision', '%.8f', 'delimiter', '\t');
+    fprintf('Clear-sky mask written to %s; clear obs = %d / %d\n', ...
+        clear_sky_mask_file, sum(clear_sky_mask), length(clear_sky_mask));
+end
     % work on MW
-
-

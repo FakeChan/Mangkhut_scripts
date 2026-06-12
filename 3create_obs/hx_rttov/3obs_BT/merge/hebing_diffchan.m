@@ -25,6 +25,7 @@ chnum = str2num(getenv('chnum'));
 % chnum = 15; % 调试用
 
 obs_nr = [obsdir '/' instrument '/BT_' time '/'];
+profdir = getenv('prof_dir');
 
 %% --- 核心修改部分 开始 ---
 
@@ -96,6 +97,17 @@ for chnumi = 1:chnum
 end
 
 fprintf('处理完成。\n');
+
+clear_sky_mask_src = [profdir '/clear_sky_mask_' time_day '_' time_hour ':' time_min '.txt'];
+hydrometeor_path_src = [profdir '/hydrometeor_path_' time_day '_' time_hour ':' time_min '.txt'];
+if exist(clear_sky_mask_src, 'file')
+    copyfile(clear_sky_mask_src, [obs_nr 'clear_sky_mask.txt']);
+    fprintf('已复制晴空观测 mask: %s\n', [obs_nr 'clear_sky_mask.txt']);
+end
+if exist(hydrometeor_path_src, 'file')
+    copyfile(hydrometeor_path_src, [obs_nr 'hydrometeor_path.txt']);
+    fprintf('已复制水凝物路径诊断: %s\n', [obs_nr 'hydrometeor_path.txt']);
+end
 
 %=========================================================================================
 %fkc:注释掉了画图部分

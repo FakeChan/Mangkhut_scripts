@@ -21,13 +21,37 @@ out_dir = [base_dir 'BT_LACC_' lacc_center_time '/'];
 if ~exist(out_dir, 'dir')
     mkdir(out_dir);
 end
+mask_sum = zeros(point * point, 1);
+mask_count = 0;
+hydrometeor_path_sum = zeros(point * point, 1);
 
 fid = fopen([out_dir 'LACC_times.txt'], 'w');
 fprintf(fid, 'center_time=%s\n', lacc_center_time);
 for it = 1:length(lacc_times)
     fprintf(fid, 'lag_time=%s\n', lacc_times{it});
+    mask_file = [base_dir 'BT_' lacc_times{it} '/clear_sky_mask.txt'];
+    hydrometeor_path_file = [base_dir 'BT_' lacc_times{it} '/hydrometeor_path.txt'];
+    if exist(mask_file, 'file')
+        mask_sum = mask_sum + load(mask_file);
+        mask_count = mask_count + 1;
+    end
+    if exist(hydrometeor_path_file, 'file')
+        hydrometeor_path_sum = hydrometeor_path_sum + load(hydrometeor_path_file);
+    end
 end
 fclose(fid);
+
+if mask_count > 0
+    if mask_count ~= length(lacc_times)
+        error('Only %d/%d LACC lag times have clear_sky_mask.txt.', mask_count, length(lacc_times));
+    end
+    clear_sky_mask = mask_sum == length(lacc_times);
+    hydrometeor_path_mean = hydrometeor_path_sum ./ length(lacc_times);
+    dlmwrite([out_dir 'clear_sky_mask.txt'], clear_sky_mask, 'precision', '%d', 'delimiter', '\t');
+    dlmwrite([out_dir 'hydrometeor_path.txt'], hydrometeor_path_mean, 'precision', '%.8f', 'delimiter', '\t');
+    fprintf('LACC clear-sky mask written to %s; clear obs = %d / %d\n', ...
+        [out_dir 'clear_sky_mask.txt'], sum(clear_sky_mask), length(clear_sky_mask));
+end
 
 for chnumi = 1:chnum
     bt_sum = zeros(point, point);
