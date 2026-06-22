@@ -148,15 +148,15 @@ def extract_obs_seq(filepath):
 # ==========================================
 if __name__ == '__main__':
     N_members = 50
-    var = 'P'  # 或者 'QVAPOR'
+    var = 'OM_S'  # 或者 'QVAPOR'
     target_level = 0
     
     prior_dir = '/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/0mem_all_time/cyclingDA/10_00_00'
     # prior_dir = '/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/0mem_all_time/10_00_00_noinflatedOcean'
-    NR_file = '/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/wrfout_d01_2018-09-10_00:00:00'
-    obs_seq_file = '/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/1convert_obs/run_dir/obs_seq.out_kctest1_d01_10_00_00_quantile_ch4_clrsky'
+    NR_file = '/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/2domain/wrfout_d01_2018-09-10_00:00:00'
+    obs_seq_file = '/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/1convert_obs/run_dir/obs_seq.out_kctest1_d01_10_00_00_LACC_ch4'
     sample_wrf_file = f'{prior_dir}/firstguess_d01.mem001'
-    truth_txt_file = '/share/home/lililei1/kcfu/tc_mangkhut/3create_obs/hx_rttov/3obs_BT/AMSUA/BT_10_00_00/obs_d01_ch4_totalline.txt'
+    truth_txt_file = '/share/home/lililei1/kcfu/tc_mangkhut/3create_obs/hx_rttov/3obs_BT_LACC/AMSUA/BT_LACC_10_00_00/obs_d01_ch4_totalline.txt'
     
     # 提取观测元数据
     hx_lats, hx_lons, hx_ens_lists = extract_obs_seq(obs_seq_file)  

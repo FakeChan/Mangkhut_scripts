@@ -167,7 +167,7 @@ if __name__ == '__main__':
     interval   = timedelta(minutes=30)       # 时间间隔
     
     nr_dir = "/scratch/lililei1/kcfu/tc_mangkhut/NR" # NR 文件夹
-    filter_kind = "QCF_RHF"
+    filter_kind = "EAKF"
     # 实验字典: {实验名称: 实验的主路径}
     exp_dirs = {
         "Exp_oceanAssim0Run0": "/scratch/lililei1/kcfu/tc_mangkhut/cycle_test/6mem_oceanAssim0Run0",

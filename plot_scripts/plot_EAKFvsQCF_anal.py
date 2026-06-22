@@ -37,7 +37,7 @@ def getTCnest(NR_path,domain,var,plev,ocean_lev=0):
     
     if domain=='d01':
         grid_step=1
-        half_grid_size=120/7.5
+        half_grid_size=240/7.5
     elif domain == 'd02':
         grid_step=5
         half_grid_size=210/1.5
@@ -86,7 +86,7 @@ def interp_grid(grid_lats,grid_lons,input_ncdata,input_lats,input_lons,method='l
     return interp_valus
 
 if __name__ =='__main__':
-    var='OM_TMP'
+    var='OM_S'
     domain='d01'
     plev='850hpa'
     ocean_lev=0
@@ -100,7 +100,7 @@ if __name__ =='__main__':
                     '/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/2DART/run_dir/QCF_RHF/postassim_mean.nc']
     
     title_list=['firstguess','EAKF','QCF_RHF']
-    NR_path='/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/wrfout_d01_2018-09-10_00:00:00'
+    NR_path='/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/2domain/wrfout_d01_2018-09-10_00:00:00'
     #-----------------------------
     #first extract NR data
     extract_lats,extract_lons,NR_values=getTCnest(NR_path,domain,var=var,plev=plev,ocean_lev=ocean_lev)
