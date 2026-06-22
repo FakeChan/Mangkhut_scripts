@@ -1,9 +1,10 @@
 """
 Plot time series of TC-region 2-D/3-D variable RMSE against the NR run.
 
-The TC region is treated as the full NR d03 footprint. NR d03 is thinned from
+The TC center is defined by the minimum PSFC in NR d03. NR d03 is thinned from
 300 m to about the d02 1.5 km spacing, then each ensemble-member d02 field is
-linearly interpolated to that thinned NR grid. The script computes
+linearly interpolated to that thinned NR grid. RMSE is computed only within
+TC_RADIUS_KM of the NR center. The script computes
 
     1. RMSE for each ensemble member relative to NR.
     2. RMSE of the ensemble-mean field relative to NR.
@@ -28,6 +29,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from scipy.interpolate import LinearNDInterpolator
+from scipy.spatial import Delaunay
 
 # =============================================================================
 # User settings
@@ -45,6 +47,8 @@ MEMBER_DOMAIN = "d02"
 NR_THIN_FACTOR = 5
 # "stride" means sparse sampling. Change to "coarsen_mean" for block averages.
 NR_THIN_METHOD = "stride"
+TC_RADIUS_KM = 150.0
+CENTER_PRESSURE_VAR = "PSFC"
 
 FILTER_KINDS = ["EAKF", "QCF_RHF"]
 
@@ -162,6 +166,15 @@ def read_lat_lon(ds: xr.Dataset) -> tuple[np.ndarray, np.ndarray]:
     return lats, lons
 
 
+def read_2d_variable(ds: xr.Dataset, name: str, path: Path) -> np.ndarray:
+    if name not in ds:
+        raise KeyError(f"{name} not found in {path}")
+    data = isel_time0(ds[name])
+    if data.ndim != 2:
+        raise ValueError(f"{name} should be 2-D after Time selection, got dims={data.dims}: {path}")
+    return np.asarray(data.values, dtype=float)
+
+
 def select_2d_field(ds: xr.Dataset, variable: dict, path: Path) -> np.ndarray:
     name = variable["name"]
     if name not in ds:
@@ -213,26 +226,32 @@ def variable_from_signature(name: str, level_index: int | None, add_offset: floa
 
 
 @lru_cache(maxsize=None)
-def read_field_and_grid_cached(
+def read_fields_and_grid_cached(
     path_str: str,
-    name: str,
-    level_index: int | None,
-    add_offset: float,
-    scale: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    variable_signatures: tuple[tuple[str, int | None, float, float], ...],
+) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
     path = Path(path_str)
-    variable = variable_from_signature(name, level_index, add_offset, scale)
     with xr.open_dataset(path, decode_times=False, mask_and_scale=True) as ds:
         lats, lons = read_lat_lon(ds)
-        values = select_2d_field(ds, variable, path)
+        fields = {}
+        for signature in variable_signatures:
+            variable = variable_from_signature(*signature)
+            values = select_2d_field(ds, variable, path)
+            if values.shape != lats.shape:
+                raise ValueError(
+                    f"{variable['name']} shape {values.shape} does not match XLAT shape {lats.shape}: {path}"
+                )
+            fields[variable_key(variable)] = values
 
-    if values.shape != lats.shape:
-        raise ValueError(f"{name} shape {values.shape} does not match XLAT shape {lats.shape}: {path}")
-    return lats, lons, values
+    return lats, lons, fields
 
 
-def read_field_and_grid(path: Path, variable: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    return read_field_and_grid_cached(str(path), *variable_signature(variable))
+def variable_signatures(variables: list[dict]) -> tuple[tuple[str, int | None, float, float], ...]:
+    return tuple(variable_signature(variable) for variable in variables)
+
+
+def read_fields_and_grid(path: Path, variables: list[dict]) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+    return read_fields_and_grid_cached(str(path), variable_signatures(variables))
 
 
 def thin_2d(values: np.ndarray, factor: int, method: str) -> np.ndarray:
@@ -246,38 +265,122 @@ def thin_2d(values: np.ndarray, factor: int, method: str) -> np.ndarray:
     raise ValueError(f"Unsupported NR_THIN_METHOD={method!r}")
 
 
-def read_thinned_nr(path: Path, variable: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    lats, lons, values = read_field_and_grid(path, variable)
-    return (
-        thin_2d(lats, NR_THIN_FACTOR, NR_THIN_METHOD),
-        thin_2d(lons, NR_THIN_FACTOR, NR_THIN_METHOD),
-        thin_2d(values, NR_THIN_FACTOR, NR_THIN_METHOD),
-    )
+def latlon_distance_km(lats: np.ndarray, lons: np.ndarray, center_lat: float, center_lon: float) -> np.ndarray:
+    earth_radius_km = 6371.0
+    lat1 = np.deg2rad(lats)
+    lon1 = np.deg2rad(lons)
+    lat2 = np.deg2rad(center_lat)
+    lon2 = np.deg2rad(center_lon)
+    dlat = lat1 - lat2
+    dlon = lon1 - lon2
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
+    return 2.0 * earth_radius_km * np.arcsin(np.sqrt(a))
+
+
+@lru_cache(maxsize=None)
+def read_nr_time_data_cached(
+    path_str: str,
+    variable_signatures_: tuple[tuple[str, int | None, float, float], ...],
+) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray], np.ndarray, float, float, float]:
+    path = Path(path_str)
+    with xr.open_dataset(path, decode_times=False, mask_and_scale=True) as ds:
+        lats, lons = read_lat_lon(ds)
+        center_pressure = read_2d_variable(ds, CENTER_PRESSURE_VAR, path)
+        fields = {}
+        for signature in variable_signatures_:
+            variable = variable_from_signature(*signature)
+            values = select_2d_field(ds, variable, path)
+            if values.shape != lats.shape:
+                raise ValueError(
+                    f"{variable['name']} shape {values.shape} does not match XLAT shape {lats.shape}: {path}"
+                )
+            fields[variable_key(variable)] = values
+
+    if center_pressure.shape != lats.shape:
+        raise ValueError(
+            f"{CENTER_PRESSURE_VAR} shape {center_pressure.shape} does not match XLAT shape {lats.shape}: {path}"
+        )
+    center_idx = np.unravel_index(np.nanargmin(center_pressure), center_pressure.shape)
+    center_lat = float(lats[center_idx])
+    center_lon = float(lons[center_idx])
+    center_pressure_min = float(center_pressure[center_idx])
+
+    nr_lats = thin_2d(lats, NR_THIN_FACTOR, NR_THIN_METHOD)
+    nr_lons = thin_2d(lons, NR_THIN_FACTOR, NR_THIN_METHOD)
+    nr_fields = {
+        key: thin_2d(values, NR_THIN_FACTOR, NR_THIN_METHOD)
+        for key, values in fields.items()
+    }
+    tc_mask = latlon_distance_km(nr_lats, nr_lons, center_lat, center_lon) <= TC_RADIUS_KM
+    if not np.any(tc_mask):
+        raise ValueError(
+            f"No thinned NR points inside TC_RADIUS_KM={TC_RADIUS_KM:g} km for {path}; "
+            f"center lat={center_lat:.4f}, lon={center_lon:.4f}"
+        )
+    return nr_lats, nr_lons, nr_fields, tc_mask, center_lat, center_lon, center_pressure_min
+
+
+def read_nr_time_data(
+    path: Path,
+    variables: list[dict],
+) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray], np.ndarray, float, float, float]:
+    return read_nr_time_data_cached(str(path), variable_signatures(variables))
+
+
+def build_interpolation_geometry(member_lats: np.ndarray, member_lons: np.ndarray) -> tuple[Delaunay, np.ndarray]:
+    points = np.column_stack((member_lons.ravel(), member_lats.ravel()))
+    coord_valid = np.isfinite(points).all(axis=1)
+    if coord_valid.sum() < 3:
+        raise ValueError("Not enough valid member grid points for interpolation")
+    triangulation = Delaunay(points[coord_valid])
+    return triangulation, coord_valid
 
 
 def interp_member_to_nr_grid(
-    member_lats: np.ndarray,
-    member_lons: np.ndarray,
+    triangulation: Delaunay,
+    coord_valid: np.ndarray,
     member_values: np.ndarray,
     nr_lats: np.ndarray,
     nr_lons: np.ndarray,
 ) -> np.ndarray:
-    points = np.column_stack((member_lons.ravel(), member_lats.ravel()))
-    values_flat = member_values.ravel()
-    valid = np.isfinite(points).all(axis=1) & np.isfinite(values_flat)
-    if valid.sum() < 3:
+    values_flat = member_values.ravel()[coord_valid]
+    values_valid = np.isfinite(values_flat)
+    if values_valid.sum() < 3:
         raise ValueError("Not enough valid member points for interpolation")
 
-    interpolator = LinearNDInterpolator(points[valid], values_flat[valid], fill_value=np.nan)
+    if np.all(values_valid):
+        interpolator = LinearNDInterpolator(triangulation, values_flat, fill_value=np.nan)
+    else:
+        interpolator = LinearNDInterpolator(
+            triangulation.points[values_valid],
+            values_flat[values_valid],
+            fill_value=np.nan,
+        )
     return np.asarray(interpolator(nr_lons, nr_lats), dtype=float)
 
 
-def spatial_rmse(test_values: np.ndarray, truth_values: np.ndarray) -> float:
+def spatial_rmse(test_values: np.ndarray, truth_values: np.ndarray, region_mask: np.ndarray | None = None) -> float:
     mask = np.isfinite(test_values) & np.isfinite(truth_values)
+    if region_mask is not None:
+        mask &= region_mask
     if not np.any(mask):
         return np.nan
     diff = test_values[mask] - truth_values[mask]
     return float(np.sqrt(np.nanmean(diff ** 2)))
+
+
+def valid_rmse_points(test_values: np.ndarray, truth_values: np.ndarray, region_mask: np.ndarray) -> int:
+    return int((np.isfinite(test_values) & np.isfinite(truth_values) & region_mask).sum())
+
+
+def ensemble_mean_no_warning(fields: list[np.ndarray]) -> np.ndarray:
+    stack = np.stack(fields, axis=0)
+    valid = np.isfinite(stack)
+    counts = valid.sum(axis=0)
+    sums = np.where(valid, stack, 0.0).sum(axis=0)
+    mean = np.full(stack.shape[1:], np.nan, dtype=float)
+    np.divide(sums, counts, out=mean, where=counts > 0)
+    return mean
 
 
 def variable_key(variable: dict) -> str:
@@ -303,48 +406,47 @@ def calculate_for_filter(filter_kind: str, times: list[datetime]) -> pd.DataFram
         time_name = wrf_time_name(time_obj)
         print(f"\n>>> Processing {filter_kind} {time_name}")
         nr_file = find_nr_file(time_obj)
+        nr_lats, nr_lons, nr_fields, tc_mask, center_lat, center_lon, center_psfc = read_nr_time_data(
+            nr_file,
+            TARGET_VARIABLES,
+        )
+        tc_region_points = int(tc_mask.sum())
+        print(
+            f"  NR center from {CENTER_PRESSURE_VAR}: lat={center_lat:.4f}, "
+            f"lon={center_lon:.4f}, min={center_psfc:.2f}; "
+            f"TC points={tc_region_points}"
+        )
 
-        for variable in TARGET_VARIABLES:
-            nr_lats, nr_lons, nr_values = read_thinned_nr(nr_file, variable)
-            var_key = variable_key(variable)
+        for exp_name, exp_base_dir in EXP_DIRS.items():
+            member_fields_by_var = {variable_key(variable): [] for variable in TARGET_VARIABLES}
 
-            for exp_name, exp_base_dir in EXP_DIRS.items():
-                member_fields = []
+            for member in MEMBERS:
+                try:
+                    member_file = find_member_file(exp_base_dir, filter_kind, member, time_obj)
+                    member_lats, member_lons, member_fields = read_fields_and_grid(member_file, TARGET_VARIABLES)
+                    triangulation, coord_valid = build_interpolation_geometry(member_lats, member_lons)
+                except Exception as exc:
+                    print(f"  [skip] {exp_name}/{filter_kind}/{member}: {exc}")
+                    continue
 
-                for member in MEMBERS:
+                for variable in TARGET_VARIABLES:
+                    var_key = variable_key(variable)
+                    nr_values = nr_fields[var_key]
                     try:
-                        member_file = find_member_file(exp_base_dir, filter_kind, member, time_obj)
-                        member_lats, member_lons, member_values = read_field_and_grid(member_file, variable)
                         member_on_nr = interp_member_to_nr_grid(
-                            member_lats,
-                            member_lons,
-                            member_values,
+                            triangulation,
+                            coord_valid,
+                            member_fields[var_key],
                             nr_lats,
                             nr_lons,
                         )
-                        rmse = spatial_rmse(member_on_nr, nr_values)
-                        member_fields.append(member_on_nr)
-                        records.append(
-                            {
-                                "time": time_name,
-                                "time_obj": time_obj,
-                                "filter_kind": filter_kind,
-                                "experiment": exp_name,
-                                "variable": var_key,
-                                "level_index": variable["level_index"],
-                                "member": member,
-                                "metric": "member_rmse",
-                                "rmse": rmse,
-                                "unit": variable["unit"],
-                                "nr_points": int(np.isfinite(nr_values).sum()),
-                            }
-                        )
+                        rmse = spatial_rmse(member_on_nr, nr_values, tc_mask)
+                        rmse_points = valid_rmse_points(member_on_nr, nr_values, tc_mask)
+                        member_fields_by_var[var_key].append(member_on_nr)
                     except Exception as exc:
                         print(f"  [skip] {exp_name}/{filter_kind}/{member} {var_key}: {exc}")
+                        continue
 
-                if member_fields:
-                    ens_mean = np.nanmean(np.stack(member_fields, axis=0), axis=0)
-                    ens_mean_rmse = spatial_rmse(ens_mean, nr_values)
                     records.append(
                         {
                             "time": time_name,
@@ -353,13 +455,47 @@ def calculate_for_filter(filter_kind: str, times: list[datetime]) -> pd.DataFram
                             "experiment": exp_name,
                             "variable": var_key,
                             "level_index": variable["level_index"],
-                            "member": "ensmean",
-                            "metric": "ensemble_mean_rmse",
-                            "rmse": ens_mean_rmse,
+                            "member": member,
+                            "metric": "member_rmse",
+                            "rmse": rmse,
                             "unit": variable["unit"],
-                            "nr_points": int(np.isfinite(nr_values).sum()),
+                            "tc_region_points": tc_region_points,
+                            "rmse_points": rmse_points,
+                            "center_lat": center_lat,
+                            "center_lon": center_lon,
+                            "center_psfc": center_psfc,
                         }
                     )
+
+            for variable in TARGET_VARIABLES:
+                var_key = variable_key(variable)
+                member_fields = member_fields_by_var[var_key]
+                if not member_fields:
+                    continue
+
+                nr_values = nr_fields[var_key]
+                ens_mean = ensemble_mean_no_warning(member_fields)
+                ens_mean_rmse = spatial_rmse(ens_mean, nr_values, tc_mask)
+                rmse_points = valid_rmse_points(ens_mean, nr_values, tc_mask)
+                records.append(
+                    {
+                        "time": time_name,
+                        "time_obj": time_obj,
+                        "filter_kind": filter_kind,
+                        "experiment": exp_name,
+                        "variable": var_key,
+                        "level_index": variable["level_index"],
+                        "member": "ensmean",
+                        "metric": "ensemble_mean_rmse",
+                        "rmse": ens_mean_rmse,
+                        "unit": variable["unit"],
+                        "tc_region_points": tc_region_points,
+                        "rmse_points": rmse_points,
+                        "center_lat": center_lat,
+                        "center_lon": center_lon,
+                        "center_psfc": center_psfc,
+                    }
+                )
 
     return pd.DataFrame.from_records(records)
 
