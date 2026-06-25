@@ -51,7 +51,7 @@ DEFAULT_NR_BASE = Path("/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/2domain"
 DATA_ROOT = "/scratch/lililei1/kcfu/tc_mangkhut/4assimilation/DART"  # None: use PROJECT_ROOT/DART, or /DART if it exists.
 FILTERS = ["EAKF", "QCF_RHF"]
 OBS_POINTS = [111, 325, 640]
-DOMAINS = ["d01", "d02"]
+DOMAINS = ["d02"]
 MEMBERS = list(range(1, 51))
 
 # Observation source used only for obs location/value.  This can be a single
