@@ -10,8 +10,8 @@ Each run directory is expected to contain DART analysis files such as
 ``output_d01.mem001`` and ``output_mean_d01.nc`` plus ``test.out``.  The
 observation source and first-guess member directory are configured separately
 near the top of this file.  The ensemble grid is interpolated to the NR grid
-before computing and plotting analysis-minus-NR fields in a TC-centered 150 km
-region.
+before computing and plotting analysis-minus-NR fields in a TC-centered square
+with 150 km half-width.
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ NR_BASE = DEFAULT_NR_BASE
 NR_DOMAIN = "d02"
 TIME_STRING = "2018-09-10_00:00:00"
 
-TC_RADIUS_KM = 150.0
+TC_HALF_WIDTH_KM = 150.0
 STATE_SELECTION = "obs_nearest"  # max_abs_error, obs_nearest, or tc_center
 STATE_LAT = None
 STATE_LON = None
@@ -234,6 +234,29 @@ def latlon_distance_km(lat1: np.ndarray, lon1: np.ndarray, lat2: float, lon2: fl
     dlon = lon1_rad - lon2_rad
     a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1_rad) * math.cos(lat2_rad) * np.sin(dlon / 2.0) ** 2
     return radius_earth_km * 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
+
+
+def latlon_offsets_km(lats: np.ndarray, lons: np.ndarray, center_lat: float, center_lon: float) -> tuple[np.ndarray, np.ndarray]:
+    radius_earth_km = 6371.0
+    dlat = np.radians(lats - center_lat)
+    dlon = np.radians(lons - center_lon)
+    dy = radius_earth_km * dlat
+    dx = radius_earth_km * math.cos(math.radians(center_lat)) * dlon
+    return dx, dy
+
+
+def tc_square_mask(lats: np.ndarray, lons: np.ndarray, center_lat: float, center_lon: float, half_width_km: float) -> np.ndarray:
+    dx, dy = latlon_offsets_km(lats, lons, center_lat, center_lon)
+    return np.isfinite(dx) & np.isfinite(dy) & (np.abs(dx) <= half_width_km) & (np.abs(dy) <= half_width_km)
+
+
+def crop_to_mask(*arrays: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, ...]:
+    if not np.any(mask):
+        raise ValueError("Cannot crop because mask has no true points")
+    rows, cols = np.where(mask)
+    row_slice = slice(rows.min(), rows.max() + 1)
+    col_slice = slice(cols.min(), cols.max() + 1)
+    return tuple(arr[row_slice, col_slice] for arr in arrays)
 
 
 def find_pressure_for_center(path: Path) -> tuple[np.ndarray, str]:
@@ -647,6 +670,15 @@ def member_values_at_point(
     return np.asarray(values, dtype=float)
 
 
+def add_axis_to_point_guides(ax: plt.Axes, x: float, y: float, color: str) -> None:
+    if not np.isfinite(x) or not np.isfinite(y):
+        return
+    xmin, _ = ax.get_xlim()
+    ymin, _ = ax.get_ylim()
+    ax.plot([x, x], [ymin, y], color=color, lw=0.8, ls="--", alpha=0.8, zorder=1)
+    ax.plot([xmin, x], [y, y], color=color, lw=0.8, ls="--", alpha=0.8, zorder=1)
+
+
 def plot_scatter_panel(
     ax: plt.Axes,
     result: RunResult,
@@ -689,27 +721,36 @@ def plot_scatter_panel(
     prior_color = "#7b5fc8"
     post_color = "#57a773"
     truth_color = "#d73027"
+    guide_points: list[tuple[float, float, str]] = []
 
     if y_prior is not None and len(y_prior) >= n:
         y_prior = y_prior[:n]
         ax.scatter(x_prior, y_prior, s=14, color=prior_color, alpha=0.75, label="prior")
         for xp, xa, yp, ya in zip(x_prior, x_post, y_prior, y_post):
             ax.plot([xp, xa], [yp, ya], color="0.72", lw=0.6, zorder=0)
-        ax.scatter(np.nanmean(x_prior), np.nanmean(y_prior), s=36, marker="s", color=prior_color, label="prior mean")
+        prior_mean_x = float(np.nanmean(x_prior))
+        prior_mean_y = float(np.nanmean(y_prior))
+        ax.scatter(prior_mean_x, prior_mean_y, s=36, marker="s", color=prior_color, label="prior mean")
+        guide_points.append((prior_mean_x, prior_mean_y, prior_color))
 
     ax.scatter(x_post, y_post, s=14, color=post_color, alpha=0.75, label="analysis")
-    ax.scatter(np.nanmean(x_post), np.nanmean(y_post), s=36, marker="s", color=post_color, label="analysis mean")
+    post_mean_x = float(np.nanmean(x_post))
+    post_mean_y = float(np.nanmean(y_post))
+    ax.scatter(post_mean_x, post_mean_y, s=36, marker="s", color=post_color, label="analysis mean")
+    guide_points.append((post_mean_x, post_mean_y, post_color))
 
     if obs_info is not None and obs_info.obs_value is not None and np.isfinite(state_truth):
         ax.scatter(obs_info.obs_value, state_truth, s=55, marker="v", color=truth_color, label="NR")
-        ax.axvline(obs_info.obs_value, color=truth_color, lw=0.8, ls="--", alpha=0.8)
-        ax.axhline(state_truth, color=truth_color, lw=0.8, ls="--", alpha=0.8)
+        guide_points.append((float(obs_info.obs_value), float(state_truth), truth_color))
 
     ax.set_title(FILTER_LABELS.get(result.filt, result.filt))
     ax.set_xlabel("Brightness temperature / H(x) (K)")
     ax.set_ylabel(VAR_LABELS.get(var_name, var_name))
     ax.ticklabel_format(axis="y", style="sci", scilimits=(-3, 3))
     ax.grid(True, color="0.9", lw=0.5)
+    ax.autoscale_view()
+    for x, y, color in guide_points:
+        add_axis_to_point_guides(ax, x, y, color)
 
 
 def plot_error_panel(
@@ -726,7 +767,8 @@ def plot_error_panel(
     vlim: float,
 ) -> None:
     field = np.where(region_mask, result.error_on_nr, np.nan)
-    pcm = ax.pcolormesh(nr_lons, nr_lats, field, shading="auto", cmap="RdBu_r", vmin=-vlim, vmax=vlim)
+    plot_lons, plot_lats, plot_field = crop_to_mask(nr_lons, nr_lats, field, mask=region_mask)
+    pcm = ax.pcolormesh(plot_lons, plot_lats, plot_field, shading="auto", cmap="RdBu_r", vmin=-vlim, vmax=vlim)
     ax.scatter(tc_lon, tc_lat, marker="+", s=70, lw=1.5, c="black", label="TC center")
     if obs_info is not None and obs_info.lat is not None and obs_info.lon is not None:
         ax.scatter(obs_info.lon, obs_info.lat, marker="x", s=44, lw=1.3, c="black", label="obs")
@@ -734,6 +776,8 @@ def plot_error_panel(
     ax.set_title(f"{FILTER_LABELS.get(result.filt, result.filt)} mean - NR, RMSE={result.rmse:.3g}")
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")
+    ax.set_xlim(float(np.nanmin(plot_lons)), float(np.nanmax(plot_lons)))
+    ax.set_ylim(float(np.nanmin(plot_lats)), float(np.nanmax(plot_lats)))
     ax.set_aspect("equal", adjustable="box")
     ax.grid(True, color="0.88", lw=0.4)
     return pcm
@@ -750,9 +794,9 @@ def make_figure(
     nr_lats, nr_lons = read_grid_for_field(nr_file, VAR_NAME)
     nr_truth = read_field(nr_file, VAR_NAME, LEVEL, scale)
     tc_lat, tc_lon, tc_pressure, center_name = tc_center_from_nr(nr_file)
-    region_mask = latlon_distance_km(nr_lats, nr_lons, tc_lat, tc_lon) <= TC_RADIUS_KM
+    region_mask = tc_square_mask(nr_lats, nr_lons, tc_lat, tc_lon, TC_HALF_WIDTH_KM)
     if not np.any(region_mask):
-        raise ValueError(f"No NR grid points inside {TC_RADIUS_KM:g} km of TC center")
+        raise ValueError(f"No NR grid points inside the TC-centered square half-width {TC_HALF_WIDTH_KM:g} km")
 
     run_dirs = {filt: resolve_run_dir(data_root, filt, obs_point) for filt in FILTERS}
     obs_source = resolve_obs_source(obs_point, next(iter(run_dirs.values())))
@@ -843,7 +887,7 @@ def make_figure(
         (
             f"Single obs {obs_point}, {domain}, {VAR_NAME}"
             f"{'' if LEVEL is None else f' level {LEVEL}'} | "
-            f"NR center from {center_name}={tc_pressure:.1f}, radius={TC_RADIUS_KM:g} km"
+            f"NR center from {center_name}={tc_pressure:.1f}, half-width={TC_HALF_WIDTH_KM:g} km"
         ),
         fontsize=10,
     )
