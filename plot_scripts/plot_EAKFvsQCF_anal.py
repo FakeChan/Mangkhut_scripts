@@ -86,7 +86,7 @@ def interp_grid(grid_lats,grid_lons,input_ncdata,input_lats,input_lons,method='l
     return interp_valus
 
 if __name__ =='__main__':
-    var='OM_S'
+    var='OM_TMP'
     domain='d01'
     plev='850hpa'
     ocean_lev=0
@@ -96,8 +96,8 @@ if __name__ =='__main__':
     #                 '/scratch/lililei1/kcfu/tc_mangkhut/5cyclingDA/postAnal_QCF_RHF/d01_10_00_00/analysis_d01.ensmean']
     
     anal_file_list=['/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/0mem_all_time/cyclingDA/10_00_00/firstguess_d01.ensmean',
-                    '/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/2DART/run_dir/EAKF/postassim_mean.nc',
-                    '/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/2DART/run_dir/QCF_RHF/postassim_mean.nc']
+                    '/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/2DART/run_dir/EAKF/postassim_mean_d01.nc',
+                    '/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/2DART/run_dir/QCF_RHF/postassim_mean_d01.nc']
     
     title_list=['firstguess','EAKF','QCF_RHF']
     NR_path='/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/2domain/wrfout_d01_2018-09-10_00:00:00'
@@ -113,7 +113,7 @@ if __name__ =='__main__':
     # --- Data Processing Loop for finding global min/max ---
     for ifile,file in enumerate(anal_file_list):
         print(f'now proceeding {file[-26:-1]}')
-        nc_ds=xr.open_dataset(file)
+        nc_ds=xr.open_dataset(file,engine='netcdf4')
         
         if var=='U':
             input_lats=nc_ds['XLAT_U'].values
@@ -186,7 +186,7 @@ if __name__ =='__main__':
     RMSE_values=[]
     for ival,val in enumerate(interp_values_list):
         if ival ==0:
-            diff=val-NR_values
+            diff=NR_values-val
             fg=val
             diff_data_list.append(diff)
             all_diff_values.append(diff.flatten())
@@ -196,7 +196,7 @@ if __name__ =='__main__':
             rmse=calculate_rmse(NR_values.flatten(),val.flatten())
             RMSE_values.append(rmse)
             continue
-        diff = val - NR_values
+        diff = val - fg
         diff_data_list.append(diff)
         all_diff_values.append(diff.flatten())
         print("NR_values 包含 NaN 吗?", np.isnan(NR_values).any())

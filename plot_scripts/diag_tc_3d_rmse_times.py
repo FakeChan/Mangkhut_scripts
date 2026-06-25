@@ -50,7 +50,7 @@ NR_THIN_METHOD = "stride"
 TC_RADIUS_KM = 150.0
 CENTER_PRESSURE_VAR = "PSFC"
 
-FILTER_KINDS = ["EAKF", "QCF_RHF"]
+FILTER_KINDS = ["EAKF"]
 
 EXP_DIRS = {
     "Exp_oceanAssim0Run0": Path("/scratch/lililei1/kcfu/tc_mangkhut/cycle_test/6mem_oceanAssim0Run0"),
@@ -61,7 +61,7 @@ EXP_DIRS = {
 MEMBERS = ["006", "015", "029", "037", "043", "044"]
 
 # Select the model-level index here. Use None for 2-D variables.
-VERTICAL_LEVEL_INDEX = 10
+VERTICAL_LEVEL_INDEX = 14
 
 TARGET_VARIABLES = [
     {

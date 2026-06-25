@@ -45,12 +45,12 @@ next_time=10_06_00
 cycle_interval=6 #unit:hour
 export max_dom=2
 
-export filter_kind=1         #1=EAKF,2=QCF_RHF
+export filter_kind=2         #1=EAKF,2=QCF_RHF
 export rttov_scatt=0         #0= simple cloud , 1 = rttov-scatt
 export obs_err_std=0.25       #controls sigma_y
 
-export update_ocean=1  #0 = no update ocean
-export run_ocean=1     #1= run wrf with ocean
+export update_ocean=0  #0 = no update ocean
+export run_ocean=0     #1= run wrf with ocean
 
 run_wrf_flag=1
 run_da_flag=1
@@ -100,6 +100,10 @@ if [ "$run_da_flag" -eq 1 ];then
     fi
   
     cp input.nml.step1 input.nml
+    #-------------make sure obs_seq.out is using LACC----------------
+    rm obs_seq.out
+    ln -sf /share/home/lililei1/kcfu/tc_mangkhut/4assimilation/1convert_obs/run_dir/obs_seq.out_kctest1_d01_10_00_00_LACC_ch4 ./obs_seq.out
+    #----------------------------------------------------------------
     rm -f fkc_dart
     bsub < ./sub_dart.sh
     # mpirun ./filters
@@ -149,6 +153,9 @@ if [ "$run_da_flag" -eq 1 ];then
   fi
   rm -f fkc_dart
   cp ./input.nml.step2 ./input.nml
+
+  rm obs_seq.out
+  ln -sf /share/home/lililei1/kcfu/tc_mangkhut/4assimilation/1convert_obs/run_dir/obs_seq.out_kctest1_d01_10_00_00_quantile_ch4_clrsky ./obs_seq.out
   bsub < ./sub_dart.sh
   # mpirun ./filters
   elapsed_time=0

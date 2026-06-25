@@ -53,7 +53,7 @@ build_lacc_times() {
 	local times=""
 	local lag lag_day lag_hour
 
-	for lag in ${LACC_LAG_HOURS:-3 6};do
+	for lag in ${LACC_LAG_HOURS:-3 6 9};do
 		lag_day=${center_day_num}
 		lag_hour=$((center_hour_num - lag))
 		while (( lag_hour < 0 ));do

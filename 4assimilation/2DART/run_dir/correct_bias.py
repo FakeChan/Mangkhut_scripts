@@ -23,7 +23,7 @@ TRUTH_FILE = '/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/wrfout_d03_2018-09
 # 优先从环境变量读取，如果没有设置，则默认使用当前目录下的 'corrected_output'
 WORK_DIR = os.environ.get('ensmem_dir')
 if not WORK_DIR:
-    WORK_DIR = './corrected_output'
+    WORK_DIR = '/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/0mem_all_time/cyclingDA/10_00_00'
     print(f"[Warning] 环境变量 'ensmem_dir' 未设置，将使用默认目录: {WORK_DIR}")
 
 # 变量名

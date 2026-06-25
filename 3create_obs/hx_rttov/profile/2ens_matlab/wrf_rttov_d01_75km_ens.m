@@ -55,8 +55,8 @@ delta_x=7500;
 %=============================================
 %update in 2025.2.21
 work_dir=getenv('prof_mem_dir');
-NR_location='/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/'
-NR_fname=['wrfout_d03_2018-09-' center_time ':00']
+NR_location='/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/2domain'
+NR_fname=['wrfout_d02_2018-09-' center_time ':00']
 
 ens_fname=strcat(wrfdir,'/',wrf_fname) 
 % ilist=readmatrix(strcat(NR_location,'/','NR_d02_ilist.txt'));

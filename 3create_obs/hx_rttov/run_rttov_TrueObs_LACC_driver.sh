@@ -51,7 +51,7 @@ build_lacc_times() {
 	local times=""
 	local lag lag_day lag_hour
 
-	for lag in ${LACC_LAG_HOURS:-3 6};do
+	for lag in ${LACC_LAG_HOURS:-3 6 9};do
 		lag_day=${center_day_num}
 		lag_hour=$((center_hour_num - lag))
 		while (( lag_hour < 0 ));do
@@ -76,7 +76,7 @@ echo "LACC truth lag times: ${lacc_times}"
 # set work dir
 export work_dir=/share/home/lililei1/kcfu/tc_mangkhut/3create_obs/hx_rttov
 export run_matlab_dir=${work_dir}/profile
-export NR_wrfout_dir=/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/
+export NR_wrfout_dir=/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/2domain/
 export rttov_dir=/share/home/lililei1/kcfu/models/rttov123
 export prof_dir=${work_dir}/profile/profile_${domain}_LACC_${lacc_center_time}
 export obs_dir=${work_dir}/3obs_BT_LACC
