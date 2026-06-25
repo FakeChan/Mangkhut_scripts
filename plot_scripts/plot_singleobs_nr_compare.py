@@ -599,9 +599,24 @@ def interp_file_to_nr(path: Path, var_name: str, level: int | None, scale: float
     return interp_to_targets(src_lats, src_lons, src_values, nr_lats, nr_lons)
 
 
-def interp_file_to_point(path: Path, var_name: str, level: int | None, scale: float, lat: float, lon: float) -> float:
-    value = interp_file_to_nr(path, var_name, level, scale, np.asarray([[lat]]), np.asarray([[lon]]))
-    return float(value[0, 0])
+def member_file_value_at_nearest_grid(
+    path: Path,
+    var_name: str,
+    level: int | None,
+    scale: float,
+    reference_lat: float,
+    reference_lon: float,
+) -> float:
+    lats, lons = read_grid_for_field(path, var_name)
+    values = read_field(path, var_name, level, scale)
+    if values.shape != lats.shape:
+        raise ValueError(f"{path}: {var_name} shape {values.shape} does not match grid {lats.shape}")
+    valid = np.isfinite(lats) & np.isfinite(lons) & np.isfinite(values)
+    if not np.any(valid):
+        raise ValueError(f"{path}: no finite {var_name} values for nearest-grid lookup")
+    dist = latlon_distance_km(lats, lons, reference_lat, reference_lon)
+    j, i = np.unravel_index(np.nanargmin(np.where(valid, dist, np.nan)), values.shape)
+    return float(values[j, i])
 
 
 def rmse(values: np.ndarray, truth: np.ndarray, mask: np.ndarray) -> float:
@@ -626,6 +641,22 @@ def choose_state_point(
     return float(nr_lats[j, i]), float(nr_lons[j, i]), float(truth[j, i])
 
 
+def nearest_grid_state_point(
+    nr_lats: np.ndarray,
+    nr_lons: np.ndarray,
+    truth: np.ndarray,
+    region_mask: np.ndarray,
+    reference_lat: float,
+    reference_lon: float,
+) -> tuple[float, float, float]:
+    valid = np.isfinite(truth) & region_mask
+    if not np.any(valid):
+        raise ValueError("No finite truth grid points are available for state-point selection")
+    dist = latlon_distance_km(nr_lats, nr_lons, reference_lat, reference_lon)
+    j, i = np.unravel_index(np.nanargmin(np.where(valid, dist, np.nan)), truth.shape)
+    return float(nr_lats[j, i]), float(nr_lons[j, i]), float(truth[j, i])
+
+
 def select_state_point(
     selection: str,
     nr_lats: np.ndarray,
@@ -640,21 +671,14 @@ def select_state_point(
     tc_lon: float,
 ) -> tuple[float, float, float]:
     if explicit_lat is not None and explicit_lon is not None:
-        truth_point = interp_to_targets(nr_lats, nr_lons, truth, np.asarray([[explicit_lat]]), np.asarray([[explicit_lon]]))
-        return explicit_lat, explicit_lon, float(truth_point[0, 0])
+        return nearest_grid_state_point(nr_lats, nr_lons, truth, region_mask, explicit_lat, explicit_lon)
     if selection == "tc_center":
-        valid_truth = np.isfinite(truth) & region_mask
-        dist = latlon_distance_km(nr_lats, nr_lons, tc_lat, tc_lon)
-        j, i = np.unravel_index(np.nanargmin(np.where(valid_truth, dist, np.nan)), truth.shape)
-        return float(nr_lats[j, i]), float(nr_lons[j, i]), float(truth[j, i])
+        return nearest_grid_state_point(nr_lats, nr_lons, truth, region_mask, tc_lat, tc_lon)
     if selection == "obs_nearest":
         if obs_info is None or obs_info.lat is None or obs_info.lon is None:
             warnings.warn("Observation location unavailable; falling back to max_abs_error state point")
         else:
-            dist = latlon_distance_km(nr_lats, nr_lons, obs_info.lat, obs_info.lon)
-            valid = np.isfinite(truth) & region_mask
-            j, i = np.unravel_index(np.nanargmin(np.where(valid, dist, np.nan)), truth.shape)
-            return float(nr_lats[j, i]), float(nr_lons[j, i]), float(truth[j, i])
+            return nearest_grid_state_point(nr_lats, nr_lons, truth, region_mask, obs_info.lat, obs_info.lon)
     return choose_state_point(nr_lats, nr_lons, truth, score, region_mask)
 
 
@@ -705,7 +729,7 @@ def member_values_at_point(
         if path is None:
             missing.append(member)
             continue
-        values.append(interp_file_to_point(path, var_name, level, scale, lat, lon))
+        values.append(member_file_value_at_nearest_grid(path, var_name, level, scale, lat, lon))
     if missing:
         warnings.warn(f"{run_dir}: missing {len(missing)} member files for prefixes {prefixes}")
     if not values:
@@ -889,6 +913,7 @@ def make_figure(
         tc_lat,
         tc_lon,
     )
+    print(f"State grid point: lat={state_lat}, lon={state_lon}, NR value={state_truth}")
 
     finite_increments = np.concatenate([r.increment_on_nr[np.isfinite(r.increment_on_nr) & region_mask].ravel() for r in results])
     vlim = float(np.nanpercentile(np.abs(finite_increments), 98)) if finite_increments.size else 1.0
