@@ -10,8 +10,8 @@ Each run directory is expected to contain DART analysis files such as
 ``output_d01.mem001`` and ``output_mean_d01.nc`` plus ``test.out``.  The
 observation source and first-guess member directory are configured separately
 near the top of this file.  The ensemble grid is interpolated to the NR grid
-before computing and plotting analysis-minus-NR fields in a TC-centered square
-with 150 km half-width.
+before computing and plotting analysis-minus-prior fields in a TC-centered
+square with 150 km half-width.
 """
 
 from __future__ import annotations
@@ -54,11 +54,9 @@ OBS_POINTS = [111, 325, 640]
 DOMAINS = ["d01", "d02"]
 MEMBERS = list(range(1, 51))
 
-# Observation source used only for obs location/value.  This can be:
-#   1. a single obs_seq file,
-#   2. a directory containing obs_seq files,
-#   3. a root directory containing obs_seq111, obs_seq325, obs_seq640,
-#   4. a dict such as {111: "/path/to/obs_seq111", 325: "..."}.
+# Observation source used only for obs location/value.  This can be a single
+# obs_seq file, a directory containing obs_seq.out.111-style files, or a dict
+# such as {111: "/path/to/obs_seq.out.111", 325: "..."}.
 OBS_SOURCE_PATH = "/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/2DART/run_dir"
 
 # First-guess member files used for the prior/state scatter panels.  This can be
@@ -110,6 +108,7 @@ VAR_LABELS = {
 @dataclass
 class ObsSeqInfo:
     obs_id: int | None = None
+    obs_index: int | None = None
     lat: float | None = None
     lon: float | None = None
     obs_value: float | None = None
@@ -122,9 +121,9 @@ class RunResult:
     filt: str
     run_dir: Path
     mean_file: Path
-    error_on_nr: np.ndarray
+    increment_on_nr: np.ndarray
     mean_on_nr: np.ndarray
-    rmse: float
+    rms: float
     obs_space: dict[str, np.ndarray]
 
 
@@ -335,9 +334,14 @@ def parse_obs_space_log(path: Path, members: list[int]) -> dict[str, np.ndarray]
     return out
 
 
-def parse_obs_seq(path: Path, wanted_obs_id: int | None = None) -> ObsSeqInfo | None:
+def parse_obs_seq(
+    path: Path,
+    wanted_obs_id: int | None = None,
+    wanted_obs_index: int | None = None,
+) -> ObsSeqInfo | None:
     lines = path.read_text(errors="replace").splitlines()
     i = 0
+    obs_index = 0
     best: ObsSeqInfo | None = None
     while i < len(lines):
         if not re.match(r"\s*OBS\s+\d+", lines[i]):
@@ -346,7 +350,7 @@ def parse_obs_seq(path: Path, wanted_obs_id: int | None = None) -> ObsSeqInfo | 
 
         obs_id = int(lines[i].split()[1])
         obs_value = try_float_first_token(lines[i + 1]) if i + 1 < len(lines) else None
-        info = ObsSeqInfo(obs_id=obs_id, obs_value=obs_value)
+        info = ObsSeqInfo(obs_id=obs_id, obs_index=obs_index, obs_value=obs_value)
         j = i + 3
         while j < len(lines):
             stripped = lines[j].strip()
@@ -378,12 +382,17 @@ def parse_obs_seq(path: Path, wanted_obs_id: int | None = None) -> ObsSeqInfo | 
                 continue
             j += 1
 
-        if wanted_obs_id is None or obs_id == wanted_obs_id:
+        id_matches = wanted_obs_id is not None and obs_id == wanted_obs_id
+        index_matches = wanted_obs_index is not None and obs_index == wanted_obs_index
+        if (wanted_obs_id is None and wanted_obs_index is None) or id_matches or index_matches:
             return info
         if best is None:
             best = info
+        obs_index += 1
         i = j
-    return best
+    if wanted_obs_id is None and wanted_obs_index is None:
+        return best
+    return None
 
 
 def try_float_first_token(text: str) -> float | None:
@@ -407,7 +416,15 @@ def resolve_obs_source(obs_point: int, fallback_run_dir: Path) -> Path:
     if source.is_file():
         return source
 
+    point_child = source / f"obs_seq.out.{obs_point}"
+    if point_child.exists():
+        return point_child
+
     point_child = source / f"obs_seq{obs_point}"
+    if point_child.exists():
+        return point_child
+
+    point_child = source / f"obs_seq.out{obs_point}"
     if point_child.exists():
         return point_child
 
@@ -424,20 +441,27 @@ def resolve_firstguess_dir(domain: str) -> Path:
     return Path(FIRSTGUESS_DIR)
 
 
+def point_specific_obs_source(path: Path, obs_point: int) -> bool:
+    point_names = {f"obs_seq{obs_point}", f"obs_seq.out{obs_point}", f"obs_seq.out.{obs_point}"}
+    return path.name in point_names or path.parent.name in point_names
+
+
 def find_obs_seq_info(obs_source: Path, obs_point: int) -> ObsSeqInfo | None:
     if obs_source.is_file():
         try:
-            return parse_obs_seq(obs_source, wanted_obs_id=None)
+            return parse_obs_seq(obs_source)
         except Exception as exc:
             warnings.warn(f"Could not parse obs_seq metadata from {obs_source}: {exc}")
             return None
 
     candidates = [
-        obs_source / "obs_seq.final",
-        obs_source / "obs_seq.out",
+        obs_source / f"obs_seq.out.{obs_point}",
         obs_source / f"obs_seq{obs_point}",
         obs_source / f"obs_seq.out{obs_point}",
+        obs_source / "obs_seq.final",
+        obs_source / "obs_seq.out",
     ]
+    candidates.extend(sorted(p for p in obs_source.glob(f"obs_seq*{obs_point}*") if p.is_file()))
     candidates.extend(sorted(p for p in obs_source.glob("obs_seq*") if p.is_file()))
     seen: set[Path] = set()
     for path in candidates:
@@ -445,7 +469,7 @@ def find_obs_seq_info(obs_source: Path, obs_point: int) -> ObsSeqInfo | None:
             continue
         seen.add(path)
         try:
-            info = parse_obs_seq(path, wanted_obs_id=None)
+            info = parse_obs_seq(path)
         except Exception as exc:
             warnings.warn(f"Could not parse obs_seq metadata from {path}: {exc}")
             continue
@@ -497,6 +521,25 @@ def find_member_file(run_dir: Path, domain: str, member: int, prefixes: list[str
     for prefix in prefixes:
         matches.extend(run_dir.glob(f"{prefix}*{domain}*mem{mem}*"))
     return sorted(matches)[0] if matches else None
+
+
+def find_firstguess_mean_file(firstguess_dir: Path, domain: str) -> Path:
+    candidates = [
+        f"firstguess_{domain}.ensmean",
+        f"firstguess_{domain}.ensmean.nc",
+        f"firstguess_{domain}.mean",
+        f"firstguess_{domain}.mean.nc",
+        "firstguess.ensmean",
+        "firstguess.ensmean.nc",
+    ]
+    for name in candidates:
+        path = firstguess_dir / name
+        if path.exists():
+            return path
+    matches = sorted(firstguess_dir.glob(f"*firstguess*{domain}*ensmean*"))
+    if matches:
+        return matches[0]
+    raise FileNotFoundError(f"No first-guess mean file for {domain} under {firstguess_dir}")
 
 
 def subset_source_for_targets(
@@ -626,20 +669,20 @@ def calculate_run(
     scale: float,
     nr_lats: np.ndarray,
     nr_lons: np.ndarray,
-    nr_truth: np.ndarray,
+    prior_mean_on_nr: np.ndarray,
     region_mask: np.ndarray,
 ) -> RunResult:
     mean_file = find_mean_file(run_dir, domain)
     mean_on_nr = interp_file_to_nr(mean_file, var_name, level, scale, nr_lats, nr_lons)
-    error = mean_on_nr - nr_truth
+    increment = mean_on_nr - prior_mean_on_nr
     obs_space = parse_obs_space_log(run_dir / "test.out", members)
     return RunResult(
         filt=filt,
         run_dir=run_dir,
         mean_file=mean_file,
-        error_on_nr=np.where(region_mask, error, np.nan),
+        increment_on_nr=np.where(region_mask, increment, np.nan),
         mean_on_nr=np.where(region_mask, mean_on_nr, np.nan),
-        rmse=rmse(mean_on_nr, nr_truth, region_mask),
+        rms=rmse(mean_on_nr, prior_mean_on_nr, region_mask),
         obs_space=obs_space,
     )
 
@@ -766,14 +809,14 @@ def plot_error_panel(
     state_lon: float,
     vlim: float,
 ) -> None:
-    field = np.where(region_mask, result.error_on_nr, np.nan)
+    field = np.where(region_mask, result.increment_on_nr, np.nan)
     plot_lons, plot_lats, plot_field = crop_to_mask(nr_lons, nr_lats, field, mask=region_mask)
     pcm = ax.pcolormesh(plot_lons, plot_lats, plot_field, shading="auto", cmap="RdBu_r", vmin=-vlim, vmax=vlim)
     ax.scatter(tc_lon, tc_lat, marker="+", s=70, lw=1.5, c="black", label="TC center")
     if obs_info is not None and obs_info.lat is not None and obs_info.lon is not None:
         ax.scatter(obs_info.lon, obs_info.lat, marker="x", s=44, lw=1.3, c="black", label="obs")
     ax.scatter(state_lon, state_lat, marker="v", s=42, c="white", edgecolors="black", linewidths=0.8, label="state")
-    ax.set_title(f"{FILTER_LABELS.get(result.filt, result.filt)} mean - NR, RMSE={result.rmse:.3g}")
+    ax.set_title(f"{FILTER_LABELS.get(result.filt, result.filt)} mean - prior mean, RMS={result.rms:.3g}")
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")
     ax.set_xlim(float(np.nanmin(plot_lons)), float(np.nanmax(plot_lons)))
@@ -801,7 +844,18 @@ def make_figure(
     run_dirs = {filt: resolve_run_dir(data_root, filt, obs_point) for filt in FILTERS}
     obs_source = resolve_obs_source(obs_point, next(iter(run_dirs.values())))
     obs_info = find_obs_seq_info(obs_source, obs_point)
+    if obs_info is None:
+        warnings.warn(f"No observation location/value found for obs point {obs_point} from {obs_source}")
+    else:
+        print(
+            f"Observation {obs_point}: source={obs_source}, "
+            f"selected_index={obs_info.obs_index}, obs_id={obs_info.obs_id}, "
+            f"lat={obs_info.lat}, lon={obs_info.lon}"
+        )
     firstguess_dir = resolve_firstguess_dir(domain)
+    prior_mean_file = find_firstguess_mean_file(firstguess_dir, domain)
+    print(f"Prior mean for {domain}: {prior_mean_file}")
+    prior_mean_on_nr = interp_file_to_nr(prior_mean_file, VAR_NAME, LEVEL, scale, nr_lats, nr_lons)
 
     results = [
         calculate_run(
@@ -815,7 +869,7 @@ def make_figure(
             scale,
             nr_lats,
             nr_lons,
-            nr_truth,
+            prior_mean_on_nr,
             region_mask,
         )
         for filt, run_dir in run_dirs.items()
@@ -827,7 +881,7 @@ def make_figure(
         nr_lats,
         nr_lons,
         nr_truth,
-        reference.error_on_nr,
+        reference.increment_on_nr,
         region_mask,
         obs_info,
         STATE_LAT,
@@ -836,8 +890,8 @@ def make_figure(
         tc_lon,
     )
 
-    finite_errors = np.concatenate([r.error_on_nr[np.isfinite(r.error_on_nr) & region_mask].ravel() for r in results])
-    vlim = float(np.nanpercentile(np.abs(finite_errors), 98)) if finite_errors.size else 1.0
+    finite_increments = np.concatenate([r.increment_on_nr[np.isfinite(r.increment_on_nr) & region_mask].ravel() for r in results])
+    vlim = float(np.nanpercentile(np.abs(finite_increments), 98)) if finite_increments.size else 1.0
     if not np.isfinite(vlim) or vlim == 0:
         vlim = 1.0
 
@@ -876,7 +930,7 @@ def make_figure(
             vlim,
         )
         if col == ncols - 1:
-            fig.colorbar(pcm, ax=axs[1, :], shrink=0.88, label=f"{VAR_LABELS.get(VAR_NAME, VAR_NAME)} difference")
+            fig.colorbar(pcm, ax=axs[1, :], shrink=0.88, label=f"{VAR_LABELS.get(VAR_NAME, VAR_NAME)} increment")
 
     if axs[0, 0].get_legend_handles_labels()[0]:
         axs[0, 0].legend(loc="best", fontsize=7)
