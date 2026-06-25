@@ -40,7 +40,7 @@ from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "figs" / "singleobs_nr_compare"
-DEFAULT_NR_BASE = Path("/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout")
+DEFAULT_NR_BASE = Path("/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/2domain")
 
 
 # =============================================================================
@@ -48,7 +48,7 @@ DEFAULT_NR_BASE = Path("/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout")
 # =============================================================================
 # Edit this block before running the script.  Analysis output is expected as:
 #   DATA_ROOT / FILTER / obs_seq{point}
-DATA_ROOT = None  # None: use PROJECT_ROOT/DART, or /DART if it exists.
+DATA_ROOT = "/scratch/lililei1/kcfu/tc_mangkhut/4assimilation/DART"  # None: use PROJECT_ROOT/DART, or /DART if it exists.
 FILTERS = ["EAKF", "QCF_RHF"]
 OBS_POINTS = [111, 325, 640]
 DOMAINS = ["d01", "d02"]
@@ -59,16 +59,16 @@ MEMBERS = list(range(1, 51))
 #   2. a directory containing obs_seq files,
 #   3. a root directory containing obs_seq111, obs_seq325, obs_seq640,
 #   4. a dict such as {111: "/path/to/obs_seq111", 325: "..."}.
-OBS_SOURCE_PATH = None
+OBS_SOURCE_PATH = "/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/2DART/run_dir"
 
 # First-guess member files used for the prior/state scatter panels.  This can be
 # a single directory containing firstguess_d01.mem001, firstguess_d02.mem001,
 # or a dict such as {"d01": "/path/to/d01/firstguess", "d02": "/path/to/d02/firstguess"}.
-FIRSTGUESS_DIR = None
+FIRSTGUESS_DIR = "/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/0mem_all_time/cyclingDA/10_00_00"
 
 # Field to compare with NR.  QVAPOR is automatically converted kg kg-1 -> g kg-1.
-VAR_NAME = "QVAPOR"
-LEVEL = 2
+VAR_NAME = "OM_TMP"
+LEVEL = 0
 SCALE = "auto"
 
 # NR setting.  Set NR_FILE directly when possible.  If NR_FILE is None, the
@@ -76,16 +76,16 @@ SCALE = "auto"
 NR_FILE = None
 NR_BASE = DEFAULT_NR_BASE
 NR_DOMAIN = "d02"
-TIME_STRING = None
+TIME_STRING = "2018-09-10_00:00:00"
 
 TC_RADIUS_KM = 150.0
-STATE_SELECTION = "max_abs_error"  # max_abs_error, obs_nearest, or tc_center
+STATE_SELECTION = "obs_nearest"  # max_abs_error, obs_nearest, or tc_center
 STATE_LAT = None
 STATE_LON = None
 
 OUTPUT_DIR = DEFAULT_OUTPUT_DIR
 FIG_FORMAT = "png"
-DPI = 450
+DPI = 300
 
 # File name prefixes used when searching analysis and first-guess directories.
 OUTPUT_PREFIXES = ["output", "postassim", "analysis"]
@@ -93,7 +93,7 @@ FIRSTGUESS_PREFIXES = ["firstguess", "input", "preassim", "prior"]
 
 FILTER_LABELS = {
     "EAKF": "EAKF",
-    "QCF_RHF": "QCF-RHF",
+    "QCF_RHF": "QCF_RHF",
 }
 
 VAR_LABELS = {
