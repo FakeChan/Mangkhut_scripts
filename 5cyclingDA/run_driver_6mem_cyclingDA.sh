@@ -49,8 +49,8 @@ export filter_kind=2         #1=EAKF,2=QCF_RHF
 export rttov_scatt=0         #0= simple cloud , 1 = rttov-scatt
 export obs_err_std=0.25       #controls sigma_y
 
-export update_ocean=0  #0 = no update ocean
-export run_ocean=0     #1= run wrf with ocean
+export update_ocean=1  #0 = no update ocean
+export run_ocean=1     #1= run wrf with ocean
 
 run_wrf_flag=1
 run_da_flag=1
