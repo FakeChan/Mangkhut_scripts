@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Plot the probability density distribution of ensemble Hx values from obs_seq.out.
+Plot probability density distributions of ensemble Hx values from obs_seq.out.
 
-The script reads DART obs_seq.out files with external_FO blocks.  For the usual
-50-member, 676-observation case it flattens the Hx matrix into 50*676 samples,
-plots a density histogram with configurable bar width, and overlays the
-Gaussian PDF estimated from all samples.
+The script reads two DART obs_seq.out files with external_FO blocks.  For the
+usual 50-member, 676-observation case it flattens each Hx matrix into 50*676
+samples, plots density histograms with configurable bar width, and overlays
+Gaussian PDFs estimated from each file's samples.
 """
 
 from __future__ import annotations
@@ -31,9 +31,15 @@ import numpy as np
 # =============================================================================
 # User configuration
 # =============================================================================
-OBS_SEQ_PATH = Path("/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/2DART/run_dir/obs_seq.out")
+OBS_SEQ_PATHS = [
+    Path("/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/2DART/run_dir/obs_seq.out"),
+    Path("/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/2DART/run_dir/obs_seq.out"),
+]
+DATASET_LABELS = ["obs_seq 1", "obs_seq 2"]
+DATASET_COLORS = ["#4f7fb8", "#d08a37"]
+
 OUTPUT_DIR = Path(__file__).resolve().parent / "figs" / "hx_pdf"
-OUTPUT_NAME = "hx_pdf"
+OUTPUT_NAME = "hx_pdf_compare"
 
 EXPECTED_NOBS = 676
 EXPECTED_MEMBERS = 50
@@ -45,7 +51,7 @@ FIGSIZE = (4.8, 3.4)
 DPI = 450
 
 HX_LABEL = "Hx"
-FIG_TITLE = "Ensemble Hx distribution"
+FIG_TITLE = "Ensemble Hx distributions"
 
 
 def configure_matplotlib() -> None:
@@ -132,38 +138,73 @@ def gaussian_pdf(x: np.ndarray, mean: float, std: float) -> np.ndarray:
     return np.exp(-0.5 * z**2) / (std * math.sqrt(2.0 * math.pi))
 
 
-def plot_hx_pdf(hx: np.ndarray, bin_width: float, output_dir: Path, output_name: str) -> Path:
+def finite_samples(hx: np.ndarray) -> np.ndarray:
     samples = hx.reshape(-1)
     samples = samples[np.isfinite(samples)]
     if samples.size == 0:
         raise ValueError("No finite Hx samples available for plotting")
+    return samples
 
-    mean = float(np.mean(samples))
-    std = float(np.std(samples, ddof=1))
-    bins = make_bins(samples, bin_width)
+
+def plot_hx_pdf_comparison(
+    hx_list: list[np.ndarray],
+    labels: list[str],
+    colors: list[str],
+    bin_width: float,
+    output_dir: Path,
+    output_name: str,
+) -> Path:
+    if len(hx_list) != 2:
+        raise ValueError("This comparison plot expects exactly two Hx arrays")
+    if len(labels) != len(hx_list):
+        raise ValueError("DATASET_LABELS length must match OBS_SEQ_PATHS")
+    if len(colors) != len(hx_list):
+        raise ValueError("DATASET_COLORS length must match OBS_SEQ_PATHS")
+
+    sample_sets = [finite_samples(hx) for hx in hx_list]
+    all_samples = np.concatenate(sample_sets)
+    bins = make_bins(all_samples, bin_width)
     x_pdf = np.linspace(bins[0], bins[-1], 800)
-    y_pdf = gaussian_pdf(x_pdf, mean, std)
 
     configure_matplotlib()
     fig, ax = plt.subplots(figsize=FIGSIZE)
-    ax.hist(
-        samples,
-        bins=bins,
-        density=True,
-        color="#6f8fbf",
-        edgecolor="white",
-        linewidth=0.4,
-        alpha=0.82,
-        label=f"Hx histogram (bin={bin_width:g})",
-    )
-    ax.plot(
-        x_pdf,
-        y_pdf,
-        color="#c23b3b",
-        lw=1.8,
-        label=rf"Gaussian $\mu$={mean:.3g}, $\sigma$={std:.3g}",
-    )
-    ax.axvline(mean, color="#2f2f2f", lw=1.0, ls="--", label="Mean")
+
+    stats_lines = []
+    summary_lines = []
+    for hx, samples, label, color in zip(hx_list, sample_sets, labels, colors):
+        mean = float(np.mean(samples))
+        std = float(np.std(samples, ddof=1))
+        y_pdf = gaussian_pdf(x_pdf, mean, std)
+        ax.hist(
+            samples,
+            bins=bins,
+            density=True,
+            color=color,
+            edgecolor="white",
+            linewidth=0.35,
+            alpha=0.42,
+            label=f"{label} histogram",
+        )
+        ax.plot(
+            x_pdf,
+            y_pdf,
+            color=color,
+            lw=1.9,
+            label=rf"{label} Gaussian $\mu$={mean:.3g}, $\sigma$={std:.3g}",
+        )
+        ax.axvline(mean, color=color, lw=1.0, ls="--", alpha=0.9)
+        stats_lines.extend(
+            [
+                f"[{label}]",
+                f"n_obs = {hx.shape[0]}",
+                f"n_members = {hx.shape[1]}",
+                f"n_samples = {samples.size}",
+                f"mean = {mean:.12g}",
+                f"std_ddof1 = {std:.12g}",
+                "",
+            ]
+        )
+        summary_lines.append(f"{label}: n={samples.size}, mu={mean:.3g}, sigma={std:.3g}")
 
     ax.set_title(FIG_TITLE)
     ax.set_xlabel(HX_LABEL)
@@ -174,7 +215,7 @@ def plot_hx_pdf(hx: np.ndarray, bin_width: float, output_dir: Path, output_name:
     ax.text(
         0.98,
         0.96,
-        f"n_obs={hx.shape[0]}\nn_mem={hx.shape[1]}\nn={samples.size}",
+        "\n".join(summary_lines),
         transform=ax.transAxes,
         ha="right",
         va="top",
@@ -191,13 +232,11 @@ def plot_hx_pdf(hx: np.ndarray, bin_width: float, output_dir: Path, output_name:
     stats_path.write_text(
         "\n".join(
             [
-                f"obs_seq_path = {OBS_SEQ_PATH}",
-                f"n_obs = {hx.shape[0]}",
-                f"n_members = {hx.shape[1]}",
-                f"n_samples = {samples.size}",
-                f"mean = {mean:.12g}",
-                f"std_ddof1 = {std:.12g}",
+                "obs_seq_paths:",
+                *[f"  {label}: {path}" for label, path in zip(labels, OBS_SEQ_PATHS)],
                 f"bin_width = {bin_width:.12g}",
+                "",
+                *stats_lines,
             ]
         )
         + "\n"
@@ -206,10 +245,16 @@ def plot_hx_pdf(hx: np.ndarray, bin_width: float, output_dir: Path, output_name:
 
 
 def main() -> None:
-    hx = parse_obs_seq_hx(OBS_SEQ_PATH)
-    validate_hx_shape(hx, EXPECTED_NOBS, EXPECTED_MEMBERS)
-    out_png = plot_hx_pdf(hx, BIN_WIDTH, OUTPUT_DIR, OUTPUT_NAME)
-    print(f"Parsed Hx shape: {hx.shape}")
+    if len(OBS_SEQ_PATHS) != 2:
+        raise ValueError("OBS_SEQ_PATHS must contain exactly two obs_seq.out files")
+    hx_list = []
+    for path in OBS_SEQ_PATHS:
+        hx = parse_obs_seq_hx(path)
+        validate_hx_shape(hx, EXPECTED_NOBS, EXPECTED_MEMBERS)
+        hx_list.append(hx)
+    out_png = plot_hx_pdf_comparison(hx_list, DATASET_LABELS, DATASET_COLORS, BIN_WIDTH, OUTPUT_DIR, OUTPUT_NAME)
+    for label, hx in zip(DATASET_LABELS, hx_list):
+        print(f"{label}: parsed Hx shape {hx.shape}")
     print(f"Wrote {out_png}")
 
 
