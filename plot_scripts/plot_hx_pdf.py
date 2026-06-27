@@ -47,6 +47,9 @@ EXPECTED_MEMBERS = 50
 # Histogram bar width in Hx units.  Change this value to adjust bar width.
 BIN_WIDTH = 0.25
 
+# Extend Gaussian PDF beyond histogram limits so the tails approach zero.
+PDF_TAIL_STD = 4.0
+
 FIGSIZE = (4.8, 3.4)
 DPI = 450
 
@@ -138,6 +141,22 @@ def gaussian_pdf(x: np.ndarray, mean: float, std: float) -> np.ndarray:
     return np.exp(-0.5 * z**2) / (std * math.sqrt(2.0 * math.pi))
 
 
+def make_pdf_x(samples_list: list[np.ndarray], bins: np.ndarray, bin_width: float, tail_std: float) -> np.ndarray:
+    means = np.asarray([np.mean(samples) for samples in samples_list], dtype=float)
+    stds = np.asarray([np.std(samples, ddof=1) for samples in samples_list], dtype=float)
+    finite = np.isfinite(means) & np.isfinite(stds) & (stds > 0)
+    if np.any(finite):
+        pdf_min = float(np.min(means[finite] - tail_std * stds[finite]))
+        pdf_max = float(np.max(means[finite] + tail_std * stds[finite]))
+    else:
+        pdf_min = float(bins[0])
+        pdf_max = float(bins[-1])
+    pad = max(bin_width, 0.02 * (float(bins[-1]) - float(bins[0])))
+    x_min = min(float(bins[0]), pdf_min) - pad
+    x_max = max(float(bins[-1]), pdf_max) + pad
+    return np.linspace(x_min, x_max, 1000)
+
+
 def finite_samples(hx: np.ndarray) -> np.ndarray:
     samples = hx.reshape(-1)
     samples = samples[np.isfinite(samples)]
@@ -164,13 +183,12 @@ def plot_hx_pdf_comparison(
     sample_sets = [finite_samples(hx) for hx in hx_list]
     all_samples = np.concatenate(sample_sets)
     bins = make_bins(all_samples, bin_width)
-    x_pdf = np.linspace(bins[0], bins[-1], 800)
+    x_pdf = make_pdf_x(sample_sets, bins, bin_width, PDF_TAIL_STD)
 
     configure_matplotlib()
     fig, ax = plt.subplots(figsize=FIGSIZE)
 
     stats_lines = []
-    summary_lines = []
     for hx, samples, label, color in zip(hx_list, sample_sets, labels, colors):
         mean = float(np.mean(samples))
         std = float(np.std(samples, ddof=1))
@@ -183,14 +201,14 @@ def plot_hx_pdf_comparison(
             edgecolor="white",
             linewidth=0.35,
             alpha=0.42,
-            label=f"{label} histogram",
+            label=label,
         )
         ax.plot(
             x_pdf,
             y_pdf,
             color=color,
             lw=1.9,
-            label=rf"{label} Gaussian $\mu$={mean:.3g}, $\sigma$={std:.3g}",
+            label="_nolegend_",
         )
         ax.axvline(mean, color=color, lw=1.0, ls="--", alpha=0.9)
         stats_lines.extend(
@@ -204,24 +222,12 @@ def plot_hx_pdf_comparison(
                 "",
             ]
         )
-        summary_lines.append(f"{label}: n={samples.size}, mu={mean:.3g}, sigma={std:.3g}")
 
     ax.set_title(FIG_TITLE)
     ax.set_xlabel(HX_LABEL)
     ax.set_ylabel("Probability density")
     ax.grid(True, color="0.9", lw=0.5)
     ax.legend(loc="best", fontsize=7)
-
-    ax.text(
-        0.98,
-        0.96,
-        "\n".join(summary_lines),
-        transform=ax.transAxes,
-        ha="right",
-        va="top",
-        fontsize=7,
-        bbox={"facecolor": "white", "edgecolor": "0.85", "alpha": 0.9, "pad": 3},
-    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_png = output_dir / f"{output_name}.png"
