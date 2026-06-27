@@ -32,14 +32,14 @@ import numpy as np
 # User configuration
 # =============================================================================
 OBS_SEQ_PATHS = [
-    Path("/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/2DART/run_dir/obs_seq.out"),
-    Path("/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/2DART/run_dir/obs_seq.out"),
+    Path("/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/1convert_obs/run_dir/obs_seq.out_kctest1_d01_10_00_00_quantile_ch4_clrsky"),
+    Path("/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/1convert_obs/run_dir/obs_seq.out_kctest1_d01_10_00_00_LACC_ch4"),
 ]
-DATASET_LABELS = ["obs_seq 1", "obs_seq 2"]
+DATASET_LABELS = ["obs_seq", "obs_seq_LACC"]
 DATASET_COLORS = ["#4f7fb8", "#d08a37"]
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "figs" / "hx_pdf"
-OUTPUT_NAME = "hx_pdf_compare"
+OUTPUT_NAME = "hx_pdf_compare_1000"
 
 EXPECTED_NOBS = 676
 EXPECTED_MEMBERS = 50
