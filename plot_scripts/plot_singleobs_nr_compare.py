@@ -50,8 +50,19 @@ DEFAULT_NR_BASE = Path("/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/2domain"
 #   DATA_ROOT / FILTER / obs_seq{point}
 DATA_ROOT = "/scratch/lililei1/kcfu/tc_mangkhut/4assimilation/DART"  # None: use PROJECT_ROOT/DART, or /DART if it exists.
 FILTERS = ["EAKF", "QCF_RHF"]
-OBS_POINTS = [111, 325, 640]
-DOMAINS = ["d02"]
+nobs=111
+OBS_POINTS = [nobs]
+
+if nobs == 640:
+    STATE_LAT = 15.2
+    STATE_LON = 148.24
+elif nobs == 111:
+    STATE_LAT = 14.0
+    STATE_LON = 147.6
+elif nobs == 361:
+    STATE_LAT = None
+    STATE_LON = None
+DOMAINS = ["d01"]
 MEMBERS = list(range(1, 51))
 
 # Observation source used only for obs location/value.  This can be a single
@@ -62,7 +73,7 @@ OBS_SOURCE_PATH = "/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/2DART/run
 # First-guess member files used for the prior/state scatter panels.  This can be
 # a single directory containing firstguess_d01.mem001, firstguess_d02.mem001,
 # or a dict such as {"d01": "/path/to/d01/firstguess", "d02": "/path/to/d02/firstguess"}.
-FIRSTGUESS_DIR = "/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/0mem_all_time/cyclingDA/10_00_00"
+FIRSTGUESS_DIR = "/scratch/lililei1/kcfu/tc_mangkhut/4assimilation/DART/EAKF/obs_seq361"
 
 # Field to compare with NR.  QVAPOR is automatically converted kg kg-1 -> g kg-1.
 VAR_NAME = "OM_TMP"
@@ -77,17 +88,16 @@ NR_DOMAIN = "d02"
 TIME_STRING = "2018-09-10_00:00:00"
 
 TC_HALF_WIDTH_KM = 150.0
-STATE_SELECTION = "obs_nearest"  # max_abs_error, obs_nearest, or tc_center
-STATE_LAT = None
-STATE_LON = None
+STATE_SELECTION = "obs_nearest" # max_abs_error, obs_nearest, or tc_center
+
 
 OUTPUT_DIR = DEFAULT_OUTPUT_DIR
 FIG_FORMAT = "png"
 DPI = 300
 
 # File name prefixes used when searching analysis and first-guess directories.
-OUTPUT_PREFIXES = ["output", "postassim", "analysis"]
-FIRSTGUESS_PREFIXES = ["firstguess", "input", "preassim", "prior"]
+OUTPUT_PREFIXES = ["postassim", "output", "analysis"]
+FIRSTGUESS_PREFIXES = ["preassim", "firstguess", "input", "prior"]
 
 FILTER_LABELS = {
     "EAKF": "EAKF",
@@ -507,12 +517,14 @@ def find_mean_file(run_dir: Path, domain: str) -> Path:
 
 def find_member_file(run_dir: Path, domain: str, member: int, prefixes: list[str]) -> Path | None:
     mem = f"{member:03d}"
+    mem4 = f"{member:04d}"
     for prefix in prefixes:
         candidates = [
             run_dir / f"{prefix}_{domain}.mem{mem}",
             run_dir / f"{prefix}_{domain}.mem{mem}.nc",
             run_dir / f"{prefix}.{domain}.mem{mem}",
             run_dir / f"{prefix}.mem{mem}",
+            run_dir / f"{prefix}_member_{mem4}_{domain}.nc"
         ]
         for path in candidates:
             if path.exists():
@@ -529,6 +541,8 @@ def find_firstguess_mean_file(firstguess_dir: Path, domain: str) -> Path:
         f"firstguess_{domain}.ensmean.nc",
         f"firstguess_{domain}.mean",
         f"firstguess_{domain}.mean.nc",
+        f"preassim_mean_{domain}.nc",
+        f"preassim_mean_{domain}",
         "firstguess.ensmean",
         "firstguess.ensmean.nc",
     ]
@@ -800,10 +814,10 @@ def plot_scatter_panel(
         ax.scatter(prior_mean_x, prior_mean_y, s=36, marker="s", color=prior_color, label="prior mean")
         guide_points.append((prior_mean_x, prior_mean_y, prior_color))
 
-    ax.scatter(x_post, y_post, s=14, color=post_color, alpha=0.75, label="analysis")
+    ax.scatter(x_post, y_post, s=14, color=post_color, alpha=0.75, label="posterior")
     post_mean_x = float(np.nanmean(x_post))
     post_mean_y = float(np.nanmean(y_post))
-    ax.scatter(post_mean_x, post_mean_y, s=36, marker="s", color=post_color, label="analysis mean")
+    ax.scatter(post_mean_x, post_mean_y, s=36, marker="s", color=post_color, label="posterior mean")
     guide_points.append((post_mean_x, post_mean_y, post_color))
 
     if obs_info is not None and obs_info.obs_value is not None and np.isfinite(state_truth):
@@ -835,12 +849,12 @@ def plot_error_panel(
 ) -> None:
     field = np.where(region_mask, result.increment_on_nr, np.nan)
     plot_lons, plot_lats, plot_field = crop_to_mask(nr_lons, nr_lats, field, mask=region_mask)
-    pcm = ax.pcolormesh(plot_lons, plot_lats, plot_field, shading="auto", cmap="RdBu_r", vmin=-vlim, vmax=vlim)
+    pcm = ax.contourf(plot_lons, plot_lats, plot_field, cmap="RdBu_r", vmin=-vlim, vmax=vlim)
     ax.scatter(tc_lon, tc_lat, marker="+", s=70, lw=1.5, c="black", label="TC center")
     if obs_info is not None and obs_info.lat is not None and obs_info.lon is not None:
         ax.scatter(obs_info.lon, obs_info.lat, marker="x", s=44, lw=1.3, c="black", label="obs")
     ax.scatter(state_lon, state_lat, marker="v", s=42, c="white", edgecolors="black", linewidths=0.8, label="state")
-    ax.set_title(f"{FILTER_LABELS.get(result.filt, result.filt)} mean - prior mean, RMS={result.rms:.3g}")
+    ax.set_title(f"{FILTER_LABELS.get(result.filt, result.filt)} mean - prior mean")
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")
     ax.set_xlim(float(np.nanmin(plot_lons)), float(np.nanmax(plot_lons)))
