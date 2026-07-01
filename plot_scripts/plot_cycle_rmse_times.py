@@ -41,6 +41,10 @@ EXPERIMENTS = ["6mem_oceanAssim0Run0", "6mem_oceanAssim0Run1", "6mem_oceanAssim1
 FILTERS = ["QCF_RHF"]
 MEMBERS = ["006", "015", "029", "037", "043", "044"]
 
+WRF_T_BASE_K = 300.0
+WRF_P0_PA = 100000.0
+WRF_R_D_OVER_CP = 287.0 / 1004.0
+
 # Configure the target variable here.
 #
 # vertical_level:
@@ -48,6 +52,8 @@ MEMBERS = ["006", "015", "029", "037", "043", "044"]
 #     int  -> variable must be 3-D after selecting Time, e.g. U(Time,z,y,x).
 #
 # scale converts both member and NR values before RMSE is computed.
+# If name == "T", WRF perturbation potential temperature is automatically
+# converted to true temperature TK using T, P, and PB before scale/power.
 # power applies an optional exponent after scaling, e.g. power=2.0 makes UST
 # become UST**2 before interpolation/RMSE. 
 # e.g. UST ==( UST * scale ) **power
@@ -83,15 +89,15 @@ TARGET_VARIABLE = {
 
 # Example for a 3-D atmospheric variable:
 # TARGET_VARIABLE = {
-#     "name": "P",
+#     "name": "T",
 #     "vertical_level": 14,
 #     "scale": 1.0,
-#     "unit": "m s-1",
+#     "unit": "K",
 #     "experiments": EXPERIMENTS,
 #     "lat_name": None,
 #     "lon_name": None,
-#     "out_csv": Path("./figs/u_level10_rmse_vs_nr_timeseries.csv"),
-#     "out_png": Path("./figs/u_level10_rmse_vs_nr_timeseries.png"),
+#     "out_csv": Path("./figs/tk_level14_rmse_vs_nr_timeseries.csv"),
+#     "out_png": Path("./figs/tk_level14_rmse_vs_nr_timeseries.png"),
 # }
 
 # Okabe-Ito / colorblind-safe scientific palette.
@@ -246,6 +252,34 @@ def read_variable_2d(ds: xr.Dataset, variable: dict) -> xr.DataArray:
     raise ValueError(f"{name} has unsupported dimensions after Time selection: {data.dims}")
 
 
+def read_pressure_2d_for_tk(ds: xr.Dataset, vertical_level: int | None, path: Path) -> np.ndarray:
+    if vertical_level is None:
+        raise ValueError(f"T is 3-D after Time selection. Set vertical_level before converting to TK: {path}")
+    if "P" not in ds or "PB" not in ds:
+        raise KeyError(f"P/PB are required to convert perturbation potential temperature T to TK: {path}")
+
+    p = isel_time0(ds["P"])
+    pb = isel_time0(ds["PB"])
+    if p.ndim != 3 or pb.ndim != 3:
+        raise ValueError(f"P/PB should be 3-D after Time selection for TK conversion: {path}")
+
+    vertical_dim = p.dims[0]
+    if vertical_level < 0 or vertical_level >= p.sizes[vertical_dim]:
+        raise IndexError(
+            f"vertical_level={vertical_level} is outside P/PB {vertical_dim} size "
+            f"{p.sizes[vertical_dim]}: {path}"
+        )
+
+    pressure = p.isel({vertical_dim: vertical_level}).values.astype(float)
+    pressure += pb.isel({vertical_dim: vertical_level}).values.astype(float)
+    return pressure
+
+
+def wrf_t_to_tk(perturbation_theta: np.ndarray, pressure_pa: np.ndarray) -> np.ndarray:
+    theta = perturbation_theta + WRF_T_BASE_K
+    return theta * (pressure_pa / WRF_P0_PA) ** WRF_R_D_OVER_CP
+
+
 def variable_signature(variable: dict) -> tuple[str, int | None, float, float, str | None, str | None]:
     return (
         variable["name"],
@@ -290,7 +324,11 @@ def read_field_and_grid_cached(
     with xr.open_dataset(path, decode_times=False) as ds:
         data = read_variable_2d(ds, variable)
         lats, lons = read_lat_lon(ds, data, variable)
-        values = (data.values.astype(float) * scale) ** power
+        values = data.values.astype(float)
+        if name.upper() == "T":
+            pressure = read_pressure_2d_for_tk(ds, vertical_level, path)
+            values = wrf_t_to_tk(values, pressure)
+        values = (values * scale) ** power
     return lats, lons, values
 
 
@@ -464,9 +502,10 @@ def calculate(times: list[datetime], variable: dict) -> pd.DataFrame:
 
 def variable_label(variable: dict) -> str:
     level = variable["vertical_level"]
+    name = "TK" if variable["name"].upper() == "T" else variable["name"]
     if level is None:
-        return variable["name"]
-    return f"{variable['name']} level {level}"
+        return name
+    return f"{name} level {level}"
 
 
 def rmse_column(variable: dict) -> str:
