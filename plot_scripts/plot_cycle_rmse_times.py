@@ -1,9 +1,10 @@
 """
-Plot domain RMSE for a configured WRF variable relative to NR.
+Plot TC-region RMSE for a configured WRF variable relative to NR.
 
 NR d03 is finer than, and smaller than, the ensemble member domain. The script
-linearly interpolates NR to each member grid and computes RMSE only over member
-grid points inside the NR d03 linear-interpolation footprint.
+linearly interpolates NR to each member grid and computes RMSE over member grid
+points inside both the NR d03 linear-interpolation footprint and a configurable
+radius around the NR TC center.
 
 All parameters are configured explicitly in this file. No command-line
 arguments are used.
@@ -11,9 +12,12 @@ arguments are used.
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
+
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -30,6 +34,8 @@ START_TIME = "2018-09-10_01:00:00"
 END_TIME = "2018-09-10_06:00:00"
 STEP_MINUTES = 60
 NR_COARSEN_FACTOR = 5
+TC_RADIUS_KM = 150.0
+CENTER_PRESSURE_VAR = "PSFC"
 
 EXPERIMENTS = ["6mem_oceanAssim0Run0", "6mem_oceanAssim0Run1", "6mem_oceanAssim1Run1"]
 FILTERS = ["QCF_RHF"]
@@ -172,6 +178,52 @@ def read_lat_lon(ds: xr.Dataset, data: xr.DataArray, variable: dict) -> tuple[np
     return lats, lons
 
 
+@lru_cache(maxsize=None)
+def read_nr_tc_center_cached(path_str: str, pressure_var: str) -> tuple[float, float, float]:
+    path = Path(path_str)
+    with xr.open_dataset(path, decode_times=False) as ds:
+        if pressure_var not in ds:
+            raise KeyError(f"{pressure_var} not found in {path}")
+        if "XLAT" not in ds or "XLONG" not in ds:
+            raise KeyError(f"XLAT/XLONG not found in {path}")
+
+        pressure = isel_time0(ds[pressure_var])
+        if pressure.ndim != 2:
+            raise ValueError(f"{pressure_var} should be 2-D after Time selection, got dims={pressure.dims}: {path}")
+
+        pressure_values = pressure.values.astype(float)
+        lats = isel_time0(ds["XLAT"]).values.astype(float)
+        lons = isel_time0(ds["XLONG"]).values.astype(float)
+
+    if pressure_values.shape != lats.shape:
+        raise ValueError(f"{pressure_var} shape {pressure_values.shape} does not match XLAT shape {lats.shape}: {path}")
+
+    center_idx = np.unravel_index(np.nanargmin(pressure_values), pressure_values.shape)
+    return float(lats[center_idx]), float(lons[center_idx]), float(pressure_values[center_idx])
+
+
+def read_nr_tc_center(path: Path) -> tuple[float, float, float]:
+    return read_nr_tc_center_cached(str(path), CENTER_PRESSURE_VAR)
+
+
+def latlon_distance_km(lats: np.ndarray, lons: np.ndarray, center_lat: float, center_lon: float) -> np.ndarray:
+    earth_radius_km = 6371.0
+    lat1 = np.deg2rad(lats)
+    lon1 = np.deg2rad(lons)
+    lat2 = np.deg2rad(center_lat)
+    lon2 = np.deg2rad(center_lon)
+    dlat = lat1 - lat2
+    dlon = lon1 - lon2
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
+    return 2.0 * earth_radius_km * np.arcsin(np.sqrt(a))
+
+
+def tc_region_mask(lats: np.ndarray, lons: np.ndarray, center_lat: float, center_lon: float) -> np.ndarray:
+    if TC_RADIUS_KM is None:
+        return np.ones_like(lats, dtype=bool)
+    return latlon_distance_km(lats, lons, center_lat, center_lon) <= TC_RADIUS_KM
+
+
 def read_variable_2d(ds: xr.Dataset, variable: dict) -> xr.DataArray:
     name = variable["name"]
     vertical_level = variable["vertical_level"]
@@ -305,6 +357,16 @@ def spatial_rmse(member_values: np.ndarray, nr_values: np.ndarray, mask: np.ndar
     return float(np.sqrt(np.nanmean(diff**2)))
 
 
+def ensemble_nanmean_no_warning(fields: list[np.ndarray]) -> np.ndarray:
+    stack = np.stack(fields, axis=0)
+    valid = np.isfinite(stack)
+    counts = valid.sum(axis=0)
+    sums = np.where(valid, stack, 0.0).sum(axis=0)
+    mean = np.full(stack.shape[1:], np.nan, dtype=float)
+    np.divide(sums, counts, out=mean, where=counts > 0)
+    return mean
+
+
 def unit_slug(variable: dict) -> str:
     return variable["unit"].replace(" ", "_").replace("/", "_")
 
@@ -324,6 +386,10 @@ def ensemble_mean_rmse_column(variable: dict) -> str:
 def calculate(times: list[datetime], variable: dict) -> pd.DataFrame:
     records = []
     nr_file_by_time = {wrf_time_name(t): find_nr_file(NR_BASE, t) for t in times}
+    nr_center_by_time = {
+        wrf_time_name(t): read_nr_tc_center(nr_file_by_time[wrf_time_name(t)])
+        for t in times
+    }
 
     for exp in variable["experiments"]:
         for filt in FILTERS:
@@ -331,22 +397,30 @@ def calculate(times: list[datetime], variable: dict) -> pd.DataFrame:
             for t in times:
                 time_name = wrf_time_name(t)
                 nr_file = nr_file_by_time[time_name]
+                center_lat, center_lon, center_pressure = nr_center_by_time[time_name]
 
                 member_rmses = []
                 member_fields = []
                 nr_fields = []
                 overlap_points = []
                 overlap_fraction = []
+                tc_points = []
+                rmse_points = []
 
                 for mem in MEMBERS:
                     member_file = find_member_file(BASE_DIR, exp, filt, mem, t)
                     ens_lats, ens_lons, ens_values = read_field_and_grid(member_file, variable)
                     nr_on_ens = interp_nr_to_member_grid(nr_file, ens_lats, ens_lons, variable)
-                    mask = np.isfinite(nr_on_ens) & np.isfinite(ens_values)
-                    n_overlap = int(mask.sum())
-                    if n_overlap == 0:
+                    overlap_mask = np.isfinite(nr_on_ens) & np.isfinite(ens_values)
+                    region_mask = tc_region_mask(ens_lats, ens_lons, center_lat, center_lon)
+                    mask = overlap_mask & region_mask
+                    n_overlap = int(overlap_mask.sum())
+                    n_tc = int(region_mask.sum())
+                    n_rmse = int(mask.sum())
+                    if n_rmse == 0:
                         raise ValueError(
-                            f"No NR/member overlap after interpolation: NR={nr_file}, member={member_file}"
+                            f"No NR/member points inside TC radius after interpolation: "
+                            f"NR={nr_file}, member={member_file}, radius={TC_RADIUS_KM}"
                         )
 
                     member_rmses.append(spatial_rmse(ens_values, nr_on_ens, mask))
@@ -354,9 +428,11 @@ def calculate(times: list[datetime], variable: dict) -> pd.DataFrame:
                     nr_fields.append(np.where(mask, nr_on_ens, np.nan))
                     overlap_points.append(n_overlap)
                     overlap_fraction.append(float(n_overlap / mask.size))
+                    tc_points.append(n_tc)
+                    rmse_points.append(n_rmse)
 
-                ens_mean_field = np.nanmean(np.stack(member_fields, axis=0), axis=0)
-                nr_mean_field = np.nanmean(np.stack(nr_fields, axis=0), axis=0)
+                ens_mean_field = ensemble_nanmean_no_warning(member_fields)
+                nr_mean_field = ensemble_nanmean_no_warning(nr_fields)
                 mean_mask = np.isfinite(ens_mean_field) & np.isfinite(nr_mean_field)
 
                 records.append(
@@ -373,6 +449,13 @@ def calculate(times: list[datetime], variable: dict) -> pd.DataFrame:
                         ),
                         "mean_overlap_points": float(np.nanmean(overlap_points)),
                         "mean_overlap_fraction": float(np.nanmean(overlap_fraction)),
+                        "mean_tc_region_points": float(np.nanmean(tc_points)),
+                        "mean_rmse_points": float(np.nanmean(rmse_points)),
+                        "tc_radius_km": TC_RADIUS_KM,
+                        "center_pressure_var": CENTER_PRESSURE_VAR,
+                        "center_lat": center_lat,
+                        "center_lon": center_lon,
+                        "center_pressure": center_pressure,
                     }
                 )
 
@@ -412,7 +495,11 @@ def plot(df: pd.DataFrame, variable: dict) -> None:
             )
 
     ax.set_xlabel("Forecast time")
-    ax.set_ylabel(f"Mean member RMSE of {variable_label(variable)} ({variable['unit']})")
+    if TC_RADIUS_KM is None:
+        region_label = "NR-overlap"
+    else:
+        region_label = f"TC {TC_RADIUS_KM:g} km"
+    ax.set_ylabel(f"{region_label} mean member RMSE of {variable_label(variable)} ({variable['unit']})")
     ax.grid(True, linestyle=":", linewidth=0.8, alpha=0.7)
     ax.legend(loc="best", frameon=False, fontsize=9, handlelength=4.0)
     fig.autofmt_xdate()
