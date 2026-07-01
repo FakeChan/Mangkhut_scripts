@@ -23,16 +23,16 @@ from scipy.interpolate import LinearNDInterpolator
 
 
 BASE_DIR = Path("/scratch/lililei1/kcfu/tc_mangkhut/cycle_test")
-NR_BASE = Path("/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout")
-MEMBER_DOMAIN = "d02"
-NR_DOMAIN = "d03"
-START_TIME = "2018-09-10_00:00:00"
+NR_BASE = Path("/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/2domain")
+MEMBER_DOMAIN = "d01"
+NR_DOMAIN = "d02"
+START_TIME = "2018-09-10_01:00:00"
 END_TIME = "2018-09-10_06:00:00"
-STEP_MINUTES = 30
+STEP_MINUTES = 60
 NR_COARSEN_FACTOR = 5
 
 EXPERIMENTS = ["6mem_oceanAssim0Run0", "6mem_oceanAssim0Run1", "6mem_oceanAssim1Run1"]
-FILTERS = ["EAKF"]
+FILTERS = ["QCF_RHF"]
 MEMBERS = ["006", "015", "029", "037", "043", "044"]
 
 # Configure the target variable here.
@@ -62,31 +62,31 @@ MEMBERS = ["006", "015", "029", "037", "043", "044"]
 # }
 
 # Example for a 2-D variable:
-# TARGET_VARIABLE = {
-#     "name": "MU",
-#     "vertical_level": None,
-#     "scale": 1,
-#     "power": 1.0,
-#     "unit": "hPa",
-#     "experiments": EXPERIMENTS,
-#     "lat_name": None,
-#     "lon_name": None,
-#     "out_csv": Path("./figs/mu_rmse_timeseries.csv"),
-#     "out_png": Path("./figs/mu_rmse_timeseries.png"),
-# }
-#
-# Example for a 3-D atmospheric variable:
 TARGET_VARIABLE = {
-    "name": "P",
-    "vertical_level": 14,
-    "scale": 1.0,
-    "unit": "m s-1",
+    "name": "HFX",
+    "vertical_level": None,
+    "scale": 1,
+    "power": 1.0,
+    "unit": "k*m/s",
     "experiments": EXPERIMENTS,
     "lat_name": None,
     "lon_name": None,
-    "out_csv": Path("./figs/u_level10_rmse_vs_nr_timeseries.csv"),
-    "out_png": Path("./figs/u_level10_rmse_vs_nr_timeseries.png"),
+    "out_csv": Path("./figs/hfx_rmse_timeseries.csv"),
+    "out_png": Path("./figs/hfx_rmse_timeseries.png"),
 }
+
+# Example for a 3-D atmospheric variable:
+# TARGET_VARIABLE = {
+#     "name": "P",
+#     "vertical_level": 14,
+#     "scale": 1.0,
+#     "unit": "m s-1",
+#     "experiments": EXPERIMENTS,
+#     "lat_name": None,
+#     "lon_name": None,
+#     "out_csv": Path("./figs/u_level10_rmse_vs_nr_timeseries.csv"),
+#     "out_png": Path("./figs/u_level10_rmse_vs_nr_timeseries.png"),
+# }
 
 # Okabe-Ito / colorblind-safe scientific palette.
 EXP_COLORS = {

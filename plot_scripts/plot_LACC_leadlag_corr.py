@@ -1,17 +1,10 @@
 """
-Calculate lead-lag spatial correlation between WRF atmospheric variables at
-previous times and the reference-time TSK inside a fixed TC-centered radius.
+Calculate lead-lag correlation between WRF atmospheric variables and TSK
+inside a moving TC-centered radius.
 
-The end_time is used as the reference time:
-    1. Find the TC center at end_time.
-    2. Build one fixed radius mask around that center.
-    3. Read TSK at end_time inside that mask.
-    4. For each wrfout from start_time to end_time, compute
-       corr[ATM(time), TSK(end_time)] over the masked grid points.
-
-Lag convention:
-    lag_hours > 0 means the atmospheric variable leads the reference TSK:
-        corr[ATM(end_time - lag), TSK(end_time)]
+Default lag convention:
+    lag_hours > 0 means the atmospheric variable leads TSK:
+        corr[ATM(t - lag), TSK(t)]
 
 Edit the CONFIG block for normal use, or override selected options from
 the command line. The script writes a CSV table and a simple figure.
@@ -40,10 +33,9 @@ CONFIG = {
     "start_time": "2018-09-09_00:00:00",
     "end_time": "2018-09-10_00:00:00",
     "time_interval_hours": 3,
-    # Keep only previous times whose lag from end_time is inside this range.
-    # Positive lag: atmospheric variable leads reference-time TSK.
-    "min_lag_hours": 3,
-    "max_lag_hours": 24,
+    # Positive lag: atmospheric variable leads TSK.
+    "min_lag_hours": -24,
+    "max_lag_hours": 0,
     "lag_interval_hours": 3,
     # Radius around the TC center.
     "radius_km": 200.0,
@@ -55,7 +47,7 @@ CONFIG = {
     "ocean_var": "TSK",
     # Optional vertical levels for 3D variables, e.g. [0, 5, 10].
     # Use None to process all model levels.
-    "levels": None,
+    "levels": [0],
     "output_dir": r"./figs/LACC",
 }
 
@@ -183,62 +175,20 @@ def pearsonr(x: np.ndarray, y: np.ndarray) -> float:
     return float(np.corrcoef(x_valid, y_valid)[0, 1])
 
 
-def collect_reference_data(config: dict) -> tuple[datetime, np.ndarray, np.ndarray, dict]:
-    reference_time = parse_wrf_time(config["end_time"])
-    reference_path = wrfout_path(config["wrfout_dir"], config["domain"], reference_time)
-    if not reference_path.exists():
-        raise FileNotFoundError(f"Missing reference wrfout file: {reference_path}")
-
-    with nc.Dataset(reference_path) as ds:
-        lat = as_2d(ds.variables["XLAT"][:])
-        lon = as_2d(ds.variables["XLONG"][:])
-        center_lat, center_lon, j_center, i_center, center_var, center_value = find_tc_center(ds)
-        distance = haversine_km(lat, lon, center_lat, center_lon)
-        mask = distance <= float(config["radius_km"])
-        if not np.any(mask):
-            raise RuntimeError(f"No grid points inside {config['radius_km']} km at {reference_time}.")
-
-        reference_tsk = read_variable(ds, config["ocean_var"])
-        if np.asarray(reference_tsk).ndim != 2:
-            raise ValueError(f"Reference ocean_var must be 2D, got shape {np.asarray(reference_tsk).shape}.")
-        reference_values = np.asarray(reference_tsk, dtype=float)[mask]
-
-    center_info = {
-        "reference_time": reference_time.strftime("%Y-%m-%d_%H:%M:%S"),
-        "center_lat": center_lat,
-        "center_lon": center_lon,
-        "j_center": j_center,
-        "i_center": i_center,
-        "center_var": center_var,
-        "center_value": center_value,
-        "n_grid_points": int(mask.sum()),
-        "note": "TC center and radius mask are fixed from end_time.",
-    }
-    return reference_time, mask, reference_values, center_info
+def lead_lag_corr(atm_series: np.ndarray, tsk_series: np.ndarray, lag_steps: int) -> tuple[float, int]:
+    if lag_steps > 0:
+        x = atm_series[:-lag_steps]
+        y = tsk_series[lag_steps:]
+    elif lag_steps < 0:
+        x = atm_series[-lag_steps:]
+        y = tsk_series[:lag_steps]
+    else:
+        x = atm_series
+        y = tsk_series
+    return pearsonr(x, y), len(x)
 
 
-def spatial_corr_by_level(field: np.ndarray, mask: np.ndarray, reference_values: np.ndarray, levels: list[int] | None) -> dict[int | str, tuple[float, int]]:
-    arr = np.asarray(field, dtype=float)
-
-    if arr.ndim == 2:
-        values = arr[mask]
-        return {"surface": (pearsonr(values, reference_values), int(np.isfinite(values).sum()))}
-
-    if arr.ndim != 3:
-        raise ValueError(f"Only 2D/3D fields are supported, got shape {arr.shape}")
-
-    nz = arr.shape[0]
-    selected_levels = list(range(nz)) if levels is None else levels
-    correlations = {}
-    for level in selected_levels:
-        if level < 0 or level >= nz:
-            raise IndexError(f"Requested level {level}, but field has {nz} levels.")
-        values = arr[level, :, :][mask]
-        correlations[int(level)] = (pearsonr(values, reference_values), int(np.isfinite(values).sum()))
-    return correlations
-
-
-def calculate_reference_correlations(config: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
+def collect_time_series(config: dict) -> tuple[pd.DataFrame, dict[tuple[str, int | str], list[float]], list[float]]:
     start = parse_wrf_time(config["start_time"])
     end = parse_wrf_time(config["end_time"])
     times = make_time_list(start, end, int(config["time_interval_hours"]))
@@ -246,11 +196,9 @@ def calculate_reference_correlations(config: dict) -> tuple[pd.DataFrame, pd.Dat
     if levels is not None:
         levels = [int(level) for level in levels]
 
-    reference_time, reference_mask, reference_values, center_info = collect_reference_data(config)
-    min_lag_hours = int(config["min_lag_hours"])
-    max_lag_hours = int(config["max_lag_hours"])
-    lag_interval_hours = int(config["lag_interval_hours"])
-    rows = []
+    atm_ts: dict[tuple[str, int | str], list[float]] = {}
+    tsk_ts: list[float] = []
+    center_rows = []
 
     for time_value in times:
         path = wrfout_path(config["wrfout_dir"], config["domain"], time_value)
@@ -258,40 +206,72 @@ def calculate_reference_correlations(config: dict) -> tuple[pd.DataFrame, pd.Dat
             raise FileNotFoundError(f"Missing wrfout file: {path}")
 
         with nc.Dataset(path) as ds:
-            for varname in config["atm_vars"]:
-                lag_hours = int((reference_time - time_value).total_seconds() / 3600)
-                if lag_hours < min_lag_hours or lag_hours > max_lag_hours:
-                    continue
-                if lag_interval_hours > 0 and lag_hours % lag_interval_hours != 0:
-                    continue
-                field = read_variable(ds, varname)
-                if np.asarray(field).shape[-2:] != reference_mask.shape:
-                    raise ValueError(
-                        f"{path} {varname} horizontal shape {np.asarray(field).shape[-2:]} "
-                        f"does not match reference mask shape {reference_mask.shape}."
-                    )
-                corr_by_level = spatial_corr_by_level(field, reference_mask, reference_values, levels)
-                for level, (corr, n_pairs) in corr_by_level.items():
-                    rows.append(
-                        {
-                            "atm_var": varname,
-                            "ocean_var": config["ocean_var"],
-                            "level": level,
-                            "atm_time": time_value.strftime("%Y-%m-%d_%H:%M:%S"),
-                            "reference_time": reference_time.strftime("%Y-%m-%d_%H:%M:%S"),
-                            "lag_hours": lag_hours,
-                            "lead_label": f"t-{lag_hours}" if lag_hours > 0 else "t",
-                            "corr": corr,
-                            "n_pairs": n_pairs,
-                            "note": "positive lag means ATM(time) leads TSK(reference_time)",
-                        }
-                    )
+            lat = as_2d(ds.variables["XLAT"][:])
+            lon = as_2d(ds.variables["XLONG"][:])
+            center_lat, center_lon, j_center, i_center, center_var, center_value = find_tc_center(ds)
+            distance = haversine_km(lat, lon, center_lat, center_lon)
+            mask = distance <= float(config["radius_km"])
+            if not np.any(mask):
+                raise RuntimeError(f"No grid points inside {config['radius_km']} km at {time_value}.")
 
-    return pd.DataFrame(rows), pd.DataFrame([center_info])
+            tsk = read_variable(ds, config["ocean_var"])
+            tsk_ts.append(area_mean_by_level(tsk, mask, None)["surface"])
+
+            for varname in config["atm_vars"]:
+                field = read_variable(ds, varname)
+                means = area_mean_by_level(field, mask, levels)
+                for level, mean_value in means.items():
+                    atm_ts.setdefault((varname, level), []).append(mean_value)
+
+            center_rows.append(
+                {
+                    "time": time_value.strftime("%Y-%m-%d_%H:%M:%S"),
+                    "center_lat": center_lat,
+                    "center_lon": center_lon,
+                    "j_center": j_center,
+                    "i_center": i_center,
+                    "center_var": center_var,
+                    "center_value": center_value,
+                    "n_grid_points": int(mask.sum()),
+                }
+            )
+
+    return pd.DataFrame(center_rows), atm_ts, tsk_ts
 
 
 def calculate_correlations(config: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
-    return calculate_reference_correlations(config)
+    center_df, atm_ts, tsk_ts = collect_time_series(config)
+    tsk_arr = np.asarray(tsk_ts, dtype=float)
+
+    lag_hours = np.arange(
+        int(config["min_lag_hours"]),
+        int(config["max_lag_hours"]) + int(config["lag_interval_hours"]),
+        int(config["lag_interval_hours"]),
+    )
+
+    interval_hours = int(config["time_interval_hours"])
+    rows = []
+    for (varname, level), values in atm_ts.items():
+        atm_arr = np.asarray(values, dtype=float)
+        for lag_hour in lag_hours:
+            if lag_hour % interval_hours != 0:
+                raise ValueError("Lag hours must be integer multiples of time_interval_hours.")
+            lag_step = int(lag_hour / interval_hours)
+            corr, n_pairs = lead_lag_corr(atm_arr, tsk_arr, lag_step)
+            rows.append(
+                {
+                    "atm_var": varname,
+                    "ocean_var": config["ocean_var"],
+                    "level": level,
+                    "lag_hours": int(lag_hour),
+                    "lag_steps": lag_step,
+                    "corr": corr,
+                    "n_pairs": n_pairs,
+                    "note": "positive lag means atm leads TSK",
+                }
+            )
+
+    return pd.DataFrame(rows), center_df
 
 
 def plot_correlations(corr_df: pd.DataFrame, output_png: Path) -> None:
@@ -308,15 +288,13 @@ def plot_correlations(corr_df: pd.DataFrame, output_png: Path) -> None:
 
     for ax, ((varname, level), group) in zip(axes.ravel(), groups):
         ax.set_visible(True)
-        group = group.sort_values("lag_hours", ascending=False).reset_index(drop=True)
-        xloc = np.arange(len(group))
-        ax.plot(xloc, group["corr"], marker="o", linewidth=1.6)
+        group = group.sort_values("lag_hours")
+        ax.plot(group["lag_hours"], group["corr"], marker="o", linewidth=1.6)
         ax.axhline(0.0, color="0.35", linewidth=0.8, linestyle="--")
+        ax.axvline(0.0, color="0.35", linewidth=0.8, linestyle="--")
         ax.set_title(f"{varname}, level={level}")
-        ax.set_xlabel("Lead time relative to reference TSK")
+        ax.set_xlabel("Lag hours, positive = ATM leads TSK")
         ax.set_ylabel("Correlation")
-        ax.set_xticks(xloc)
-        ax.set_xticklabels(group["lead_label"], rotation=45, ha="right")
         ax.set_ylim(-1.05, 1.05)
         ax.grid(True, alpha=0.3)
 
@@ -390,7 +368,7 @@ def main() -> None:
     print(f"Wrote correlation table: {corr_csv}")
     print(f"Wrote TC center table: {center_csv}")
     print(f"Wrote figure: {fig_png}")
-    print("Lag convention: positive lag_hours means ATM(time) leads TSK(end_time).")
+    print("Lag convention: positive lag_hours means atmospheric variable leads TSK.")
 
 
 if __name__ == "__main__":
