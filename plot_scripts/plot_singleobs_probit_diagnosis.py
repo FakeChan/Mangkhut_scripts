@@ -98,7 +98,7 @@ FIG_FORMAT = "png"
 DPI = 300
 
 # Observation likelihood standard deviation.  If None, use sqrt(errvar) from
-# obs_seq when available; otherwise fall back to 1.0.
+# obs_seq when available; otherwise the script raises an error.
 OBS_LIKELIHOOD_STD = None
 
 # PPI transform used by each filter in the diagnostic plot.  EAKF uses a
@@ -791,6 +791,16 @@ def normal_pdf(x: np.ndarray, mean: float, std: float) -> np.ndarray:
     return np.exp(-0.5 * z * z) / (std * math.sqrt(2.0 * math.pi))
 
 
+def normal_fit_pdf(values: np.ndarray, grid: np.ndarray) -> tuple[np.ndarray, float, float]:
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size < 2:
+        return np.full_like(grid, np.nan, dtype=float), float("nan"), float("nan")
+    mean = float(np.nanmean(values))
+    std = float(np.nanstd(values, ddof=1))
+    return normal_pdf(grid, mean, std), mean, std
+
+
 def bnrh_sorted_quantiles(sorted_values: np.ndarray) -> np.ndarray:
     """DART_LAB ens_quantiles.m for the unbounded RHF/BNRH case."""
     n = sorted_values.size
@@ -861,6 +871,55 @@ def bnrh_cdf_unbounded(values: np.ndarray, prior_values: np.ndarray) -> np.ndarr
                     (value - sort_ens[lower]) / (sort_ens[upper] - sort_ens[lower])
                 ) * del_q
     out[valid] = q
+    return out
+
+
+def bnrh_pdf_unbounded(grid: np.ndarray, ensemble_values: np.ndarray) -> np.ndarray:
+    """Unbounded BNRH/RHF density corresponding to bnrh_cdf_unbounded."""
+    grid = np.asarray(grid, dtype=float)
+    prior = np.asarray(ensemble_values, dtype=float)
+    out = np.full(grid.shape, np.nan, dtype=float)
+    prior = prior[np.isfinite(prior)]
+    valid_grid = np.isfinite(grid)
+    if prior.size < 2:
+        return out
+
+    sort_ens = np.sort(prior)
+    n = sort_ens.size
+    del_q = 1.0 / (n + 1.0)
+    tail_sd = float(np.std(prior, ddof=1))
+    if not np.isfinite(tail_sd) or tail_sd <= 0:
+        return out
+
+    tail_del_q = 1.0 / (n + 1.8)
+    dist_for_unit_sd = -float(ndtri(tail_del_q))
+    tail_mean_left = sort_ens[0] + dist_for_unit_sd * tail_sd
+    tail_mean_right = sort_ens[-1] - dist_for_unit_sd * tail_sd
+    left_edge_cdf = ndtr((sort_ens[0] - tail_mean_left) / tail_sd)
+    right_edge_cdf = ndtr((sort_ens[-1] - tail_mean_right) / tail_sd)
+
+    vals = grid[valid_grid]
+    pdf = np.zeros(vals.shape, dtype=float)
+    left = vals < sort_ens[0]
+    right = vals > sort_ens[-1]
+    interior = ~(left | right)
+
+    if np.any(left) and left_edge_cdf > 0:
+        pdf[left] = normal_pdf(vals[left], tail_mean_left, tail_sd) / left_edge_cdf * del_q
+    if np.any(right) and right_edge_cdf < 1.0:
+        pdf[right] = normal_pdf(vals[right], tail_mean_right, tail_sd) / (1.0 - right_edge_cdf) * del_q
+    if np.any(interior):
+        interior_vals = vals[interior]
+        upper = np.searchsorted(sort_ens, interior_vals, side="right")
+        upper = np.clip(upper, 1, n - 1)
+        lower = upper - 1
+        widths = sort_ens[upper] - sort_ens[lower]
+        good = widths > 0
+        interior_pdf = np.full(interior_vals.shape, np.nan, dtype=float)
+        interior_pdf[good] = del_q / widths[good]
+        pdf[interior] = interior_pdf
+
+    out[valid_grid] = pdf
     return out
 
 
@@ -938,11 +997,37 @@ def observation_likelihood_std(obs_info: ObsSeqInfo | None) -> float:
         return obs_std
     if obs_info is not None and obs_info.errvar is not None and obs_info.errvar > 0:
         return math.sqrt(float(obs_info.errvar))
-    return 1.0
+    raise ValueError("Set OBS_LIKELIHOOD_STD or provide an obs_seq file with a positive observation error variance.")
 
 
 def ppi_dist_for_filter(filt: str) -> str:
     return FILTER_PPI_DISTS.get(filt, "RHF")
+
+
+def should_use_logged_obs_ppi(filt: str, probit_prior: np.ndarray | None, probit_post: np.ndarray | None) -> bool:
+    """Use logged obs-space PPI only when it is the filter's native RHF update."""
+    if ppi_dist_for_filter(filt).upper() != "RHF":
+        return False
+    if probit_prior is None or probit_post is None:
+        return False
+    return np.count_nonzero(np.isfinite(probit_prior) & np.isfinite(probit_post)) >= 2
+
+
+def set_ppi_axis_limits(ax: plt.Axes, *arrays: np.ndarray) -> None:
+    finite_values = []
+    for arr in arrays:
+        values = np.asarray(arr, dtype=float)
+        finite_values.append(values[np.isfinite(values)])
+    finite_values = [values for values in finite_values if values.size > 0]
+    if not finite_values:
+        ax.set_xlim(-3.2, 3.2)
+        ax.set_ylim(-3.2, 3.2)
+        return
+    values = np.concatenate(finite_values)
+    max_abs = float(np.nanmax(np.abs(values)))
+    limit = max(3.2, min(8.5, 1.08 * max_abs))
+    ax.set_xlim(-limit, limit)
+    ax.set_ylim(-limit, limit)
 
 
 def get_firstguess_dir(domain: str) -> Path:
@@ -1089,7 +1174,7 @@ def plot_physical_joint_update_panel(
 def plot_ppi_joint_panel(ax: plt.Axes, bundle: PlotBundle) -> None:
     """Plot prior/posterior joint ensemble in probit probability integral space."""
     ppi_dist = ppi_dist_for_filter(bundle.result.filt)
-    if bundle.probit_prior is not None and bundle.probit_post is not None:
+    if should_use_logged_obs_ppi(bundle.result.filt, bundle.probit_prior, bundle.probit_post):
         obs_prior_ppi = bundle.probit_prior
         obs_post_ppi = bundle.probit_post
         obs_note = "logged obs probit"
@@ -1126,8 +1211,7 @@ def plot_ppi_joint_panel(ax: plt.Axes, bundle: PlotBundle) -> None:
     ax.set_title(f"Joint PPI space distribution ({reg_note})")
     ax.set_xlabel(f"PPI transformed observed ({obs_note})")
     ax.set_ylabel(f"PPI transformed state ({ppi_dist} prior CDF)")
-    ax.set_xlim(-3.2, 3.2)
-    ax.set_ylim(-3.2, 3.2)
+    set_ppi_axis_limits(ax, obs_prior_ppi, obs_post_ppi, state_prior_ppi, state_post_ppi)
     ax.grid(True, color="0.9", lw=0.5)
     handles, labels = ax.get_legend_handles_labels()
     if handles:
@@ -1146,16 +1230,28 @@ def plot_obs_marginal_panel(ax: plt.Axes, bundle: PlotBundle, obs_value: float |
 
     spread = float(np.nanmax(all_values) - np.nanmin(all_values))
     pad = max(0.15 * spread, obs_std * 3.0, 1.0)
-    grid = np.linspace(float(np.nanmin(all_values) - pad), float(np.nanmax(all_values) + pad), 300)
-    prior_pdf = gaussian_kde_curve(bundle.obs_prior, grid)
-    post_pdf = gaussian_kde_curve(bundle.obs_post, grid)
+    grid = np.linspace(float(np.nanmin(all_values) - pad), float(np.nanmax(all_values) + pad), 600)
 
     prior_color = "#7b5fc8"
     post_color = "#57a773"
     like_color = "#d73027"
-    ax.plot(grid, prior_pdf, color=prior_color, lw=1.5, label="prior H(x)")
-    ax.plot(grid, post_pdf, color=post_color, lw=1.5, label="posterior H(x)")
-    y0 = -0.06 * float(np.nanmax([np.nanmax(prior_pdf), np.nanmax(post_pdf), 1.0]))
+    dist_type = ppi_dist_for_filter(bundle.result.filt).upper()
+    if dist_type == "NORMAL":
+        prior_pdf, prior_mean, prior_std = normal_fit_pdf(bundle.obs_prior, grid)
+        post_pdf, post_mean, post_std = normal_fit_pdf(bundle.obs_post, grid)
+        ax.plot(grid, prior_pdf, color=prior_color, lw=1.5, label=f"prior Gaussian sd={prior_std:.3g}")
+        ax.plot(grid, post_pdf, color=post_color, lw=1.5, label=f"posterior Gaussian sd={post_std:.3g}")
+        dist_note = "fitted Gaussian"
+    else:
+        prior_pdf = bnrh_pdf_unbounded(grid, bundle.obs_prior)
+        post_pdf = bnrh_pdf_unbounded(grid, bundle.obs_post)
+        ax.plot(grid, prior_pdf, color=prior_color, lw=1.4, drawstyle="steps-mid", label="prior RHF")
+        ax.plot(grid, post_pdf, color=post_color, lw=1.4, drawstyle="steps-mid", label="posterior RHF")
+        dist_note = "rank histogram"
+
+    finite_pdf = np.concatenate([prior_pdf[np.isfinite(prior_pdf)], post_pdf[np.isfinite(post_pdf)]])
+    y_scale = float(np.nanmax(finite_pdf)) if finite_pdf.size else 1.0
+    y0 = -0.06 * max(y_scale, 1.0)
     ax.scatter(bundle.obs_prior, np.full_like(bundle.obs_prior, y0), marker="*", s=28, color=prior_color, alpha=0.75)
     ax.scatter(bundle.obs_post, np.full_like(bundle.obs_post, y0 * 1.7), marker="*", s=28, color=post_color, alpha=0.75)
 
@@ -1165,7 +1261,7 @@ def plot_obs_marginal_panel(ax: plt.Axes, bundle: PlotBundle, obs_value: float |
         ax.scatter(obs_value, 0.0, marker="*", s=70, color=like_color, zorder=4, label="obs")
 
     ax.axhline(0, color="0.2", lw=0.8)
-    ax.set_title("Marginal distribution of observation")
+    ax.set_title(f"Marginal distribution of observation ({dist_note})")
     ax.set_xlabel("Observed quantity H(x)")
     ax.set_ylabel("density / likelihood")
     ax.grid(True, color="0.9", lw=0.5)
