@@ -40,6 +40,7 @@ CENTER_PRESSURE_VAR = "PSFC"
 EXPERIMENTS = ["6mem_oceanAssim0Run0", "6mem_oceanAssim0Run1", "6mem_oceanAssim1Run1"]
 FILTERS = ["QCF_RHF"]
 MEMBERS = ["006", "015", "029", "037", "043", "044"]
+FLUX_SUM_VARIABLES = {"QFX", "QHX", "HFX", "LH", "LHFLX", "LHFX"}
 
 WRF_T_BASE_K = 300.0
 WRF_P0_PA = 100000.0
@@ -395,6 +396,10 @@ def spatial_rmse(member_values: np.ndarray, nr_values: np.ndarray, mask: np.ndar
     return float(np.sqrt(np.nanmean(diff**2)))
 
 
+def sum_difference(member_values: np.ndarray, nr_values: np.ndarray, mask: np.ndarray) -> float:
+    return float(np.nansum(member_values[mask]) - np.nansum(nr_values[mask]))
+
+
 def ensemble_nanmean_no_warning(fields: list[np.ndarray]) -> np.ndarray:
     stack = np.stack(fields, axis=0)
     valid = np.isfinite(stack)
@@ -409,6 +414,14 @@ def unit_slug(variable: dict) -> str:
     return variable["unit"].replace(" ", "_").replace("/", "_")
 
 
+def is_flux_sum_variable(variable: dict) -> bool:
+    return variable["vertical_level"] is None and variable["name"].upper() in FLUX_SUM_VARIABLES
+
+
+def metric_kind(variable: dict) -> str:
+    return "sumdiff" if is_flux_sum_variable(variable) else "rmse"
+
+
 def mean_member_rmse_column(variable: dict) -> str:
     return f"mean_member_rmse_{unit_slug(variable)}"
 
@@ -419,6 +432,42 @@ def median_member_rmse_column(variable: dict) -> str:
 
 def ensemble_mean_rmse_column(variable: dict) -> str:
     return f"ensemble_mean_rmse_{unit_slug(variable)}"
+
+
+def mean_member_sumdiff_column(variable: dict) -> str:
+    return f"mean_member_sumdiff_{unit_slug(variable)}"
+
+
+def median_member_sumdiff_column(variable: dict) -> str:
+    return f"median_member_sumdiff_{unit_slug(variable)}"
+
+
+def ensemble_mean_sumdiff_column(variable: dict) -> str:
+    return f"ensemble_mean_sumdiff_{unit_slug(variable)}"
+
+
+def mean_member_metric_column(variable: dict) -> str:
+    if is_flux_sum_variable(variable):
+        return mean_member_sumdiff_column(variable)
+    return mean_member_rmse_column(variable)
+
+
+def median_member_metric_column(variable: dict) -> str:
+    if is_flux_sum_variable(variable):
+        return median_member_sumdiff_column(variable)
+    return median_member_rmse_column(variable)
+
+
+def ensemble_mean_metric_column(variable: dict) -> str:
+    if is_flux_sum_variable(variable):
+        return ensemble_mean_sumdiff_column(variable)
+    return ensemble_mean_rmse_column(variable)
+
+
+def calculate_member_metric(member_values: np.ndarray, nr_values: np.ndarray, mask: np.ndarray, variable: dict) -> float:
+    if is_flux_sum_variable(variable):
+        return sum_difference(member_values, nr_values, mask)
+    return spatial_rmse(member_values, nr_values, mask)
 
 
 def calculate(times: list[datetime], variable: dict) -> pd.DataFrame:
@@ -437,7 +486,7 @@ def calculate(times: list[datetime], variable: dict) -> pd.DataFrame:
                 nr_file = nr_file_by_time[time_name]
                 center_lat, center_lon, center_pressure = nr_center_by_time[time_name]
 
-                member_rmses = []
+                member_metrics = []
                 member_fields = []
                 nr_fields = []
                 overlap_points = []
@@ -461,7 +510,7 @@ def calculate(times: list[datetime], variable: dict) -> pd.DataFrame:
                             f"NR={nr_file}, member={member_file}, radius={TC_RADIUS_KM}"
                         )
 
-                    member_rmses.append(spatial_rmse(ens_values, nr_on_ens, mask))
+                    member_metrics.append(calculate_member_metric(ens_values, nr_on_ens, mask, variable))
                     member_fields.append(np.where(mask, ens_values, np.nan))
                     nr_fields.append(np.where(mask, nr_on_ens, np.nan))
                     overlap_points.append(n_overlap)
@@ -469,22 +518,23 @@ def calculate(times: list[datetime], variable: dict) -> pd.DataFrame:
                     tc_points.append(n_tc)
                     rmse_points.append(n_rmse)
 
-                ens_mean_field = ensemble_nanmean_no_warning(member_fields)
-                nr_mean_field = ensemble_nanmean_no_warning(nr_fields)
-                mean_mask = np.isfinite(ens_mean_field) & np.isfinite(nr_mean_field)
+                if is_flux_sum_variable(variable):
+                    ensemble_metric = float(np.nanmean(member_metrics))
+                else:
+                    ens_mean_field = ensemble_nanmean_no_warning(member_fields)
+                    nr_mean_field = ensemble_nanmean_no_warning(nr_fields)
+                    mean_mask = np.isfinite(ens_mean_field) & np.isfinite(nr_mean_field)
+                    ensemble_metric = calculate_member_metric(ens_mean_field, nr_mean_field, mean_mask, variable)
 
                 records.append(
                     {
                         "time": time_name,
                         "experiment": exp,
                         "filter": filt,
-                        mean_member_rmse_column(variable): float(np.nanmean(member_rmses)),
-                        median_member_rmse_column(variable): float(np.nanmedian(member_rmses)),
-                        ensemble_mean_rmse_column(variable): spatial_rmse(
-                            ens_mean_field,
-                            nr_mean_field,
-                            mean_mask,
-                        ),
+                        "metric_kind": metric_kind(variable),
+                        mean_member_metric_column(variable): float(np.nanmean(member_metrics)),
+                        median_member_metric_column(variable): float(np.nanmedian(member_metrics)),
+                        ensemble_mean_metric_column(variable): ensemble_metric,
                         "mean_overlap_points": float(np.nanmean(overlap_points)),
                         "mean_overlap_fraction": float(np.nanmean(overlap_fraction)),
                         "mean_tc_region_points": float(np.nanmean(tc_points)),
@@ -509,7 +559,7 @@ def variable_label(variable: dict) -> str:
 
 
 def rmse_column(variable: dict) -> str:
-    return mean_member_rmse_column(variable)
+    return mean_member_metric_column(variable)
 
 
 def plot(df: pd.DataFrame, variable: dict) -> None:
@@ -538,7 +588,11 @@ def plot(df: pd.DataFrame, variable: dict) -> None:
         region_label = "NR-overlap"
     else:
         region_label = f"TC {TC_RADIUS_KM:g} km"
-    ax.set_ylabel(f"{region_label} mean member RMSE of {variable_label(variable)} ({variable['unit']})")
+    if is_flux_sum_variable(variable):
+        ylabel = f"{region_label} mean member grid-sum difference of {variable_label(variable)} ({variable['unit']})"
+    else:
+        ylabel = f"{region_label} mean member RMSE of {variable_label(variable)} ({variable['unit']})"
+    ax.set_ylabel(ylabel)
     ax.grid(True, linestyle=":", linewidth=0.8, alpha=0.7)
     ax.legend(loc="best", frameon=False, fontsize=9, handlelength=4.0)
     fig.autofmt_xdate()
