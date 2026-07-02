@@ -166,6 +166,17 @@ class PlotBundle:
     state_increment: np.ndarray
 
 
+@dataclass
+class PpiJointData:
+    obs_prior: np.ndarray
+    obs_post: np.ndarray
+    state_prior: np.ndarray
+    state_post: np.ndarray
+    obs_note: str
+    reg_note: str
+    ppi_dist: str
+
+
 def default_data_root() -> Path:
     project_dart = PROJECT_ROOT / "DART"
     absolute_dart = Path("/DART")
@@ -1013,19 +1024,24 @@ def should_use_logged_obs_ppi(filt: str, probit_prior: np.ndarray | None, probit
     return np.count_nonzero(np.isfinite(probit_prior) & np.isfinite(probit_post)) >= 2
 
 
-def set_ppi_axis_limits(ax: plt.Axes, *arrays: np.ndarray) -> None:
+def ppi_axis_limit_from_data(ppi_data: list[PpiJointData]) -> float:
     finite_values = []
-    for arr in arrays:
-        values = np.asarray(arr, dtype=float)
-        finite_values.append(values[np.isfinite(values)])
-    finite_values = [values for values in finite_values if values.size > 0]
+    for data in ppi_data:
+        for arr in (data.obs_prior, data.obs_post, data.state_prior, data.state_post):
+            values = np.asarray(arr, dtype=float)
+            finite = values[np.isfinite(values)]
+            if finite.size:
+                finite_values.append(finite)
     if not finite_values:
-        ax.set_xlim(-3.2, 3.2)
-        ax.set_ylim(-3.2, 3.2)
-        return
+        return 3.2
     values = np.concatenate(finite_values)
     max_abs = float(np.nanmax(np.abs(values)))
-    limit = max(3.2, min(8.5, 1.08 * max_abs))
+    return max(3.2, min(8.5, 1.08 * max_abs))
+
+
+def set_ppi_axis_limit(ax: plt.Axes, limit: float) -> None:
+    if not np.isfinite(limit) or limit <= 0:
+        limit = 3.2
     ax.set_xlim(-limit, limit)
     ax.set_ylim(-limit, limit)
 
@@ -1171,8 +1187,7 @@ def plot_physical_joint_update_panel(
         ax.legend(handles, labels, loc="best", fontsize=6)
 
 
-def plot_ppi_joint_panel(ax: plt.Axes, bundle: PlotBundle) -> None:
-    """Plot prior/posterior joint ensemble in probit probability integral space."""
+def compute_ppi_joint_data(bundle: PlotBundle) -> PpiJointData:
     ppi_dist = ppi_dist_for_filter(bundle.result.filt)
     if should_use_logged_obs_ppi(bundle.result.filt, bundle.probit_prior, bundle.probit_post):
         obs_prior_ppi = bundle.probit_prior
@@ -1196,22 +1211,35 @@ def plot_ppi_joint_panel(ax: plt.Axes, bundle: PlotBundle) -> None:
     else:
         reg_note = "PPI reg unavailable"
 
+    return PpiJointData(
+        obs_prior=obs_prior_ppi,
+        obs_post=obs_post_ppi,
+        state_prior=state_prior_ppi,
+        state_post=state_post_ppi,
+        obs_note=obs_note,
+        reg_note=reg_note,
+        ppi_dist=ppi_dist,
+    )
+
+
+def plot_ppi_joint_panel(ax: plt.Axes, ppi_data: PpiJointData, axis_limit: float) -> None:
+    """Plot prior/posterior joint ensemble in probit probability integral space."""
     prior_color = "#7b5fc8"
     post_color = "#57a773"
     line_color = "#48b9c7"
-    for xo, xp, yo, yp in zip(obs_prior_ppi, obs_post_ppi, state_prior_ppi, state_post_ppi):
+    for xo, xp, yo, yp in zip(ppi_data.obs_prior, ppi_data.obs_post, ppi_data.state_prior, ppi_data.state_post):
         if np.all(np.isfinite([xo, xp, yo, yp])):
             ax.plot([xo, xp], [yo, yp], color=line_color, lw=0.65, alpha=0.7, zorder=1)
-    ax.scatter(obs_prior_ppi, state_prior_ppi, s=16, color=prior_color, alpha=0.78, label="prior", zorder=2)
-    ax.scatter(obs_post_ppi, state_post_ppi, s=16, color=post_color, alpha=0.78, label="posterior", zorder=3)
-    annotate_fit(ax, obs_prior_ppi, state_prior_ppi, color=prior_color)
+    ax.scatter(ppi_data.obs_prior, ppi_data.state_prior, s=16, color=prior_color, alpha=0.78, label="prior", zorder=2)
+    ax.scatter(ppi_data.obs_post, ppi_data.state_post, s=16, color=post_color, alpha=0.78, label="posterior", zorder=3)
+    annotate_fit(ax, ppi_data.obs_prior, ppi_data.state_prior, color=prior_color)
 
     ax.axhline(0, color="0.82", lw=0.7)
     ax.axvline(0, color="0.82", lw=0.7)
-    ax.set_title(f"Joint PPI space distribution ({reg_note})")
-    ax.set_xlabel(f"PPI transformed observed ({obs_note})")
-    ax.set_ylabel(f"PPI transformed state ({ppi_dist} prior CDF)")
-    set_ppi_axis_limits(ax, obs_prior_ppi, obs_post_ppi, state_prior_ppi, state_post_ppi)
+    ax.set_title(f"Joint PPI space distribution ({ppi_data.reg_note})")
+    ax.set_xlabel(f"PPI transformed observed ({ppi_data.obs_note})")
+    ax.set_ylabel(f"PPI transformed state ({ppi_data.ppi_dist} prior CDF)")
+    set_ppi_axis_limit(ax, axis_limit)
     ax.grid(True, color="0.9", lw=0.5)
     handles, labels = ax.get_legend_handles_labels()
     if handles:
@@ -1339,14 +1367,16 @@ def make_figure(obs_point: int, domain: str, nr_file: Path, members: list[int], 
 
     obs_std = observation_likelihood_std(obs_info)
     obs_value = obs_info.obs_value if obs_info is not None else None
+    ppi_data = [compute_ppi_joint_data(bundle) for bundle in bundles]
+    ppi_axis_limit = ppi_axis_limit_from_data(ppi_data)
 
     configure_matplotlib()
     ncols = len(bundles)
     fig, axs = plt.subplots(3, ncols, figsize=(4.35 * ncols, 9.2), squeeze=False, constrained_layout=True)
 
-    for col, bundle in enumerate(bundles):
+    for col, (bundle, ppi_panel_data) in enumerate(zip(bundles, ppi_data)):
         plot_physical_joint_update_panel(axs[0, col], bundle, obs_value, state_truth)
-        plot_ppi_joint_panel(axs[1, col], bundle)
+        plot_ppi_joint_panel(axs[1, col], ppi_panel_data, ppi_axis_limit)
         plot_obs_marginal_panel(axs[2, col], bundle, obs_value, obs_std)
 
     fig.suptitle(
