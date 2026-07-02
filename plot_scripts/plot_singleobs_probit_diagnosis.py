@@ -9,14 +9,15 @@ improves or degrades the state estimate:
 2. joint PPI/probit-space prior and posterior distribution,
 3. observation marginal: prior/posterior H(x) distributions and likelihood.
 
-Most file discovery, obs_seq parsing, interpolation, and member extraction are
-reused from plot_singleobs_nr_compare.py.
+The script is self-contained and can be copied without plot_singleobs_nr_compare.py.
 """
 
 from __future__ import annotations
 
 import math
 import os
+import re
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,37 +31,67 @@ import matplotlib as mpl
 mpl.use("Agg")
 
 import matplotlib.pyplot as plt
+import netCDF4
 import numpy as np
+from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 from scipy.special import ndtr, ndtri
 
-import plot_singleobs_nr_compare as base
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "figs" / "singleobs_probit_diagnosis"
+DEFAULT_NR_BASE = Path("/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/2domain")
 
 
 # =============================================================================
 # User configuration
 # =============================================================================
-DATA_ROOT = base.DATA_ROOT
+# Edit this block before running the script.  Analysis output is expected as:
+#   DATA_ROOT / FILTER / obs_seq{point}
+DATA_ROOT = "/scratch/lililei1/kcfu/tc_mangkhut/4assimilation/DART"  # None: use PROJECT_ROOT/DART, or /DART if it exists.
 FILTERS = ["EAKF", "QCF_RHF"]
-OBS_POINTS = base.OBS_POINTS
-DOMAINS = base.DOMAINS
-MEMBERS = base.MEMBERS
+nobs = 111
+OBS_POINTS = [nobs]
 
-OBS_SOURCE_PATH = base.OBS_SOURCE_PATH
-FIRSTGUESS_DIR = base.FIRSTGUESS_DIR
+if nobs == 640:
+    STATE_LAT = 15.2
+    STATE_LON = 148.24
+elif nobs == 111:
+    STATE_LAT = 14.0
+    STATE_LON = 147.6
+elif nobs == 361:
+    STATE_LAT = None
+    STATE_LON = None
+else:
+    STATE_LAT = None
+    STATE_LON = None
 
-VAR_NAME = base.VAR_NAME
-LEVEL = base.LEVEL
-SCALE = base.SCALE
+DOMAINS = ["d01"]
+MEMBERS = list(range(1, 51))
 
-NR_FILE = base.NR_FILE
-NR_BASE = base.NR_BASE
-NR_DOMAIN = base.NR_DOMAIN
-TIME_STRING = base.TIME_STRING
+# Observation source used only for obs location/value.  This can be a single
+# obs_seq file, a directory containing obs_seq.out.111-style files, or a dict
+# such as {111: "/path/to/obs_seq.out.111", 325: "..."}.
+OBS_SOURCE_PATH = "/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/2DART/run_dir"
 
-TC_HALF_WIDTH_KM = base.TC_HALF_WIDTH_KM
-STATE_SELECTION = base.STATE_SELECTION
-STATE_LAT = base.STATE_LAT
-STATE_LON = base.STATE_LON
+# First-guess member files used for the prior/state scatter panels.  This can be
+# a single directory containing firstguess_d01.mem001, firstguess_d02.mem001,
+# or a dict such as {"d01": "/path/to/d01/firstguess", "d02": "/path/to/d02/firstguess"}.
+FIRSTGUESS_DIR = "/scratch/lililei1/kcfu/tc_mangkhut/4assimilation/DART/EAKF/obs_seq361"
+
+# Field to compare with NR.  QVAPOR is automatically converted kg kg-1 -> g kg-1.
+VAR_NAME = "OM_TMP"
+LEVEL = 0
+SCALE = "auto"
+
+# NR setting.  Set NR_FILE directly when possible.  If NR_FILE is None, the
+# script searches NR_BASE for wrfout_{NR_DOMAIN}_{TIME_STRING}.
+NR_FILE = None
+NR_BASE = DEFAULT_NR_BASE
+NR_DOMAIN = "d02"
+TIME_STRING = "2018-09-10_00:00:00"
+
+TC_HALF_WIDTH_KM = 150.0
+STATE_SELECTION = "obs_nearest"  # max_abs_error, obs_nearest, or tc_center
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "figs" / "singleobs_probit_diagnosis"
 FIG_FORMAT = "png"
@@ -79,15 +110,51 @@ FILTER_PPI_DISTS = {
     "QCF_RHF": "RHF",
 }
 
-FILTER_LABELS = base.FILTER_LABELS
-VAR_LABELS = base.VAR_LABELS
-OUTPUT_PREFIXES = base.OUTPUT_PREFIXES
-FIRSTGUESS_PREFIXES = base.FIRSTGUESS_PREFIXES
+# File name prefixes used when searching analysis and first-guess directories.
+OUTPUT_PREFIXES = ["postassim", "output", "analysis"]
+FIRSTGUESS_PREFIXES = ["preassim", "firstguess", "input", "prior"]
+
+FILTER_LABELS = {
+    "EAKF": "EAKF",
+    "QCF_RHF": "QCF_RHF",
+}
+
+VAR_LABELS = {
+    "QVAPOR": r"$q_v$ (g kg$^{-1}$)",
+    "THM": "Potential temperature perturbation (K)",
+    "P": "Perturbation pressure (Pa)",
+    "MU": "Dry-air mass perturbation (Pa)",
+    "OM_TMP": "Ocean temperature (K)",
+    "OM_S": "Ocean salinity",
+    "PSFC": "Surface pressure (hPa)",
+}
+
+
+@dataclass
+class ObsSeqInfo:
+    obs_id: int | None = None
+    obs_index: int | None = None
+    lat: float | None = None
+    lon: float | None = None
+    obs_value: float | None = None
+    hx: np.ndarray | None = None
+    errvar: float | None = None
+
+
+@dataclass
+class RunResult:
+    filt: str
+    run_dir: Path
+    mean_file: Path
+    increment_on_nr: np.ndarray
+    mean_on_nr: np.ndarray
+    rms: float
+    obs_space: dict[str, np.ndarray]
 
 
 @dataclass
 class PlotBundle:
-    result: base.RunResult
+    result: RunResult
     obs_prior: np.ndarray
     obs_increment: np.ndarray
     obs_post: np.ndarray
@@ -97,6 +164,580 @@ class PlotBundle:
     state_prior: np.ndarray
     state_post: np.ndarray
     state_increment: np.ndarray
+
+
+def default_data_root() -> Path:
+    project_dart = PROJECT_ROOT / "DART"
+    absolute_dart = Path("/DART")
+    if (project_dart / "EAKF").exists() or not absolute_dart.exists():
+        return project_dart
+    return absolute_dart
+
+
+def squeeze_time(arr: np.ndarray) -> np.ndarray:
+    arr = np.asarray(arr)
+    if arr.ndim >= 3 and arr.shape[0] == 1:
+        arr = arr[0]
+    return np.squeeze(arr)
+
+
+def read_2d_grid(path: Path, lat_name: str = "XLAT", lon_name: str = "XLONG") -> tuple[np.ndarray, np.ndarray]:
+    with netCDF4.Dataset(path) as ds:
+        lat = np.asarray(ds.variables[lat_name][:], dtype=float)
+        lon = np.asarray(ds.variables[lon_name][:], dtype=float)
+    return squeeze_time(lat), squeeze_time(lon)
+
+
+def field_grid_names(ds: netCDF4.Dataset, var_name: str) -> tuple[str, str]:
+    dims = ds.variables[var_name].dimensions
+    if "west_east_stag" in dims and "XLAT_U" in ds.variables:
+        return "XLAT_U", "XLONG_U"
+    if "south_north_stag" in dims and "XLAT_V" in ds.variables:
+        return "XLAT_V", "XLONG_V"
+    return "XLAT", "XLONG"
+
+
+def auto_scale(var_name: str) -> float:
+    if var_name.upper() == "QVAPOR":
+        return 1000.0
+    if var_name.upper() == "PSFC":
+        return 0.01
+    return 1.0
+
+
+def read_field(path: Path, var_name: str, level: int | None, scale: float) -> np.ndarray:
+    with netCDF4.Dataset(path) as ds:
+        if var_name not in ds.variables:
+            raise KeyError(f"{var_name} not found in {path}")
+        arr = np.asarray(ds.variables[var_name][:], dtype=float)
+
+    arr = squeeze_time(arr)
+    if arr.ndim == 3:
+        if level is None:
+            raise ValueError(f"{var_name} in {path} is 3D after time squeeze; set LEVEL near the top of this script")
+        arr = arr[level, :, :]
+    elif arr.ndim != 2:
+        raise ValueError(f"{var_name} in {path} must become 2D, got shape {arr.shape}")
+    return arr * scale
+
+
+def read_grid_for_field(path: Path, var_name: str) -> tuple[np.ndarray, np.ndarray]:
+    with netCDF4.Dataset(path) as ds:
+        lat_name, lon_name = field_grid_names(ds, var_name)
+        lat = np.asarray(ds.variables[lat_name][:], dtype=float)
+        lon = np.asarray(ds.variables[lon_name][:], dtype=float)
+    return squeeze_time(lat), squeeze_time(lon)
+
+
+def read_time_string(path: Path) -> str | None:
+    with netCDF4.Dataset(path) as ds:
+        if "Times" not in ds.variables:
+            return None
+        raw = ds.variables["Times"][:]
+    if raw.ndim == 2:
+        raw = raw[0]
+    chars = []
+    for item in raw:
+        if isinstance(item, bytes):
+            chars.append(item.decode("ascii"))
+        else:
+            chars.append(str(item))
+    text = "".join(chars).strip()
+    return text or None
+
+
+def latlon_distance_km(lat1: np.ndarray, lon1: np.ndarray, lat2: float, lon2: float) -> np.ndarray:
+    radius_earth_km = 6371.0
+    lat1_rad = np.radians(lat1)
+    lon1_rad = np.radians(lon1)
+    lat2_rad = math.radians(lat2)
+    lon2_rad = math.radians(lon2)
+    dlat = lat1_rad - lat2_rad
+    dlon = lon1_rad - lon2_rad
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1_rad) * math.cos(lat2_rad) * np.sin(dlon / 2.0) ** 2
+    return radius_earth_km * 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
+
+
+def latlon_offsets_km(lats: np.ndarray, lons: np.ndarray, center_lat: float, center_lon: float) -> tuple[np.ndarray, np.ndarray]:
+    radius_earth_km = 6371.0
+    dlat = np.radians(lats - center_lat)
+    dlon = np.radians(lons - center_lon)
+    dy = radius_earth_km * dlat
+    dx = radius_earth_km * math.cos(math.radians(center_lat)) * dlon
+    return dx, dy
+
+
+def tc_square_mask(lats: np.ndarray, lons: np.ndarray, center_lat: float, center_lon: float, half_width_km: float) -> np.ndarray:
+    dx, dy = latlon_offsets_km(lats, lons, center_lat, center_lon)
+    return np.isfinite(dx) & np.isfinite(dy) & (np.abs(dx) <= half_width_km) & (np.abs(dy) <= half_width_km)
+
+
+def find_pressure_for_center(path: Path) -> tuple[np.ndarray, str]:
+    with netCDF4.Dataset(path) as ds:
+        for name in ("SLP", "slp", "PSFC"):
+            if name in ds.variables:
+                arr = squeeze_time(np.asarray(ds.variables[name][:], dtype=float))
+                if arr.ndim == 2:
+                    return arr, name
+    raise KeyError(f"No 2D SLP/slp/PSFC variable found for TC center in {path}")
+
+
+def tc_center_from_nr(path: Path) -> tuple[float, float, float, str]:
+    lat, lon = read_2d_grid(path)
+    pressure, pressure_name = find_pressure_for_center(path)
+    if pressure.shape != lat.shape:
+        raise ValueError(f"{pressure_name} shape {pressure.shape} does not match XLAT shape {lat.shape}")
+    j, i = np.unravel_index(np.nanargmin(pressure), pressure.shape)
+    return float(lat[j, i]), float(lon[j, i]), float(pressure[j, i]), pressure_name
+
+
+def find_nr_file(nr_file: Path | None, nr_base: Path, nr_domain: str, time_string: str | None) -> Path:
+    if nr_file is not None:
+        if not nr_file.exists():
+            raise FileNotFoundError(nr_file)
+        return nr_file
+    if time_string is None:
+        raise ValueError("Could not infer Times from DART output; set NR_FILE or TIME_STRING near the top of this script")
+    pattern = f"wrfout_{nr_domain}_{time_string}"
+    matches = sorted(nr_base.rglob(pattern))
+    if not matches:
+        matches = sorted(nr_base.rglob(f"{pattern}*"))
+    if not matches:
+        raise FileNotFoundError(f"No NR file matching {pattern} under {nr_base}")
+    return matches[0]
+
+
+def parse_obs_space_log(path: Path, members: list[int]) -> dict[str, np.ndarray]:
+    if not path.exists():
+        warnings.warn(f"test.out not found: {path}")
+        return {}
+
+    key_alias = {
+        "obs_inc": "obs_increment",
+        "obs_increment": "obs_increment",
+        "obs_prior": "obs_prior",
+        "probit_obs_inc": "probit_obs_increment",
+        "probit_obs_increment": "probit_obs_increment",
+        "probit_obs_prior": "probit_obs_prior",
+    }
+    pattern = re.compile(
+        r"fkc msg:\s+(?P<key>[A-Za-z_]+):\s+"
+        r"(?P<value>[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][-+]?\d+)?)"
+    )
+    values: dict[str, list[float]] = {}
+    for line in path.read_text(errors="replace").splitlines():
+        match = pattern.search(line)
+        if not match:
+            continue
+        key = key_alias.get(match.group("key"))
+        if key is None:
+            continue
+        values.setdefault(key, []).append(float(match.group("value")))
+
+    nmem = len(members)
+    out: dict[str, np.ndarray] = {}
+    for key, vals in values.items():
+        arr = np.asarray(vals, dtype=float)
+        if arr.size < nmem:
+            warnings.warn(f"{path}: found only {arr.size} {key} values for {nmem} members")
+            continue
+        if arr.size > nmem:
+            warnings.warn(f"{path}: found {arr.size} {key} values; using the last {nmem}")
+            arr = arr[-nmem:]
+        out[key] = arr
+    return out
+
+
+def try_float_first_token(text: str) -> float | None:
+    try:
+        return float(text.split()[0])
+    except (IndexError, ValueError):
+        return None
+
+
+def parse_obs_seq(
+    path: Path,
+    wanted_obs_id: int | None = None,
+    wanted_obs_index: int | None = None,
+) -> ObsSeqInfo | None:
+    lines = path.read_text(errors="replace").splitlines()
+    i = 0
+    obs_index = 0
+    best: ObsSeqInfo | None = None
+    while i < len(lines):
+        if not re.match(r"\s*OBS\s+\d+", lines[i]):
+            i += 1
+            continue
+
+        obs_id = int(lines[i].split()[1])
+        obs_value = try_float_first_token(lines[i + 1]) if i + 1 < len(lines) else None
+        info = ObsSeqInfo(obs_id=obs_id, obs_index=obs_index, obs_value=obs_value)
+        j = i + 3
+        while j < len(lines):
+            stripped = lines[j].strip()
+            if re.match(r"\s*OBS\s+\d+", stripped):
+                break
+            if stripped == "loc3d" and j + 1 < len(lines):
+                parts = lines[j + 1].split()
+                if len(parts) >= 2:
+                    info.lon = math.degrees(float(parts[0]))
+                    info.lat = math.degrees(float(parts[1]))
+            elif stripped.startswith("external_FO"):
+                parts = stripped.split()
+                nmem = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 50
+                vals: list[float] = []
+                k = j + 1
+                while len(vals) < nmem and k < len(lines):
+                    if re.match(r"\s*OBS\s+\d+", lines[k]):
+                        break
+                    try:
+                        vals.extend(float(x) for x in lines[k].split())
+                    except ValueError:
+                        break
+                    k += 1
+                if len(vals) >= nmem:
+                    info.hx = np.asarray(vals[:nmem], dtype=float)
+                    if k + 1 < len(lines):
+                        info.errvar = try_float_first_token(lines[k + 1])
+                j = k
+                continue
+            j += 1
+
+        id_matches = wanted_obs_id is not None and obs_id == wanted_obs_id
+        index_matches = wanted_obs_index is not None and obs_index == wanted_obs_index
+        if (wanted_obs_id is None and wanted_obs_index is None) or id_matches or index_matches:
+            return info
+        if best is None:
+            best = info
+        obs_index += 1
+        i = j
+    if wanted_obs_id is None and wanted_obs_index is None:
+        return best
+    return None
+
+
+def resolve_obs_source(obs_point: int, fallback_run_dir: Path) -> Path:
+    if OBS_SOURCE_PATH is None:
+        return fallback_run_dir
+
+    if isinstance(OBS_SOURCE_PATH, dict):
+        if obs_point not in OBS_SOURCE_PATH:
+            raise KeyError(f"OBS_SOURCE_PATH has no entry for obs point {obs_point}")
+        source = Path(OBS_SOURCE_PATH[obs_point])
+    else:
+        source = Path(OBS_SOURCE_PATH)
+
+    if source.is_file():
+        return source
+
+    point_child = source / f"obs_seq.out.{obs_point}"
+    if point_child.exists():
+        return point_child
+
+    point_child = source / f"obs_seq{obs_point}"
+    if point_child.exists():
+        return point_child
+
+    point_child = source / f"obs_seq.out{obs_point}"
+    if point_child.exists():
+        return point_child
+
+    return source
+
+
+def find_obs_seq_info(obs_source: Path, obs_point: int) -> ObsSeqInfo | None:
+    if obs_source.is_file():
+        try:
+            return parse_obs_seq(obs_source)
+        except Exception as exc:
+            warnings.warn(f"Could not parse obs_seq metadata from {obs_source}: {exc}")
+            return None
+
+    candidates = [
+        obs_source / f"obs_seq.out.{obs_point}",
+        obs_source / f"obs_seq{obs_point}",
+        obs_source / f"obs_seq.out{obs_point}",
+        obs_source / "obs_seq.final",
+        obs_source / "obs_seq.out",
+    ]
+    candidates.extend(sorted(p for p in obs_source.glob(f"obs_seq*{obs_point}*") if p.is_file()))
+    candidates.extend(sorted(p for p in obs_source.glob("obs_seq*") if p.is_file()))
+    seen: set[Path] = set()
+    for path in candidates:
+        if path in seen or not path.exists() or not path.is_file():
+            continue
+        seen.add(path)
+        try:
+            info = parse_obs_seq(path)
+        except Exception as exc:
+            warnings.warn(f"Could not parse obs_seq metadata from {path}: {exc}")
+            continue
+        if info is not None and (info.lat is not None or info.obs_value is not None):
+            return info
+    return None
+
+
+def resolve_run_dir(data_root: Path, filt: str, obs_point: int) -> Path:
+    run_dir = data_root / filt / f"obs_seq{obs_point}"
+    if not run_dir.exists():
+        raise FileNotFoundError(run_dir)
+    return run_dir
+
+
+def find_mean_file(run_dir: Path, domain: str) -> Path:
+    candidates = [
+        f"output_mean_{domain}.nc",
+        f"output_mean_{domain}",
+        f"postassim_mean_{domain}.nc",
+        f"postassim_mean_{domain}",
+        f"analysis_mean_{domain}.nc",
+        f"analysis_{domain}.ensmean",
+        f"output_{domain}.ensmean",
+    ]
+    for name in candidates:
+        path = run_dir / name
+        if path.exists():
+            return path
+    matches = sorted(run_dir.glob(f"*mean*{domain}*"))
+    if matches:
+        return matches[0]
+    raise FileNotFoundError(f"No ensemble mean file for {domain} under {run_dir}")
+
+
+def find_member_file(run_dir: Path, domain: str, member: int, prefixes: list[str]) -> Path | None:
+    mem = f"{member:03d}"
+    mem4 = f"{member:04d}"
+    for prefix in prefixes:
+        candidates = [
+            run_dir / f"{prefix}_{domain}.mem{mem}",
+            run_dir / f"{prefix}_{domain}.mem{mem}.nc",
+            run_dir / f"{prefix}.{domain}.mem{mem}",
+            run_dir / f"{prefix}.mem{mem}",
+            run_dir / f"{prefix}_member_{mem4}_{domain}.nc"
+        ]
+        for path in candidates:
+            if path.exists():
+                return path
+    matches = []
+    for prefix in prefixes:
+        matches.extend(run_dir.glob(f"{prefix}*{domain}*mem{mem}*"))
+    return sorted(matches)[0] if matches else None
+
+
+def find_firstguess_mean_file(firstguess_dir: Path, domain: str) -> Path:
+    candidates = [
+        f"firstguess_{domain}.ensmean",
+        f"firstguess_{domain}.ensmean.nc",
+        f"firstguess_{domain}.mean",
+        f"firstguess_{domain}.mean.nc",
+        f"preassim_mean_{domain}.nc",
+        f"preassim_mean_{domain}",
+        "firstguess.ensmean",
+        "firstguess.ensmean.nc",
+    ]
+    for name in candidates:
+        path = firstguess_dir / name
+        if path.exists():
+            return path
+    matches = sorted(firstguess_dir.glob(f"*firstguess*{domain}*ensmean*"))
+    if matches:
+        return matches[0]
+    raise FileNotFoundError(f"No first-guess mean file for {domain} under {firstguess_dir}")
+
+
+def subset_source_for_targets(
+    lats: np.ndarray,
+    lons: np.ndarray,
+    values: np.ndarray,
+    target_lats: np.ndarray,
+    target_lons: np.ndarray,
+    pad_deg: float = 0.5,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    finite_target = np.isfinite(target_lats) & np.isfinite(target_lons)
+    lat_min = float(np.nanmin(target_lats[finite_target])) - pad_deg
+    lat_max = float(np.nanmax(target_lats[finite_target])) + pad_deg
+    lon_min = float(np.nanmin(target_lons[finite_target])) - pad_deg
+    lon_max = float(np.nanmax(target_lons[finite_target])) + pad_deg
+    mask = (
+        np.isfinite(lats)
+        & np.isfinite(lons)
+        & np.isfinite(values)
+        & (lats >= lat_min)
+        & (lats <= lat_max)
+        & (lons >= lon_min)
+        & (lons <= lon_max)
+    )
+    if mask.sum() < 3:
+        mask = np.isfinite(lats) & np.isfinite(lons) & np.isfinite(values)
+    return lats[mask], lons[mask], values[mask]
+
+
+def interp_to_targets(
+    src_lats: np.ndarray,
+    src_lons: np.ndarray,
+    src_values: np.ndarray,
+    target_lats: np.ndarray,
+    target_lons: np.ndarray,
+) -> np.ndarray:
+    flat_lats, flat_lons, flat_values = subset_source_for_targets(
+        src_lats, src_lons, src_values, target_lats, target_lons
+    )
+    if flat_values.size < 3:
+        raise ValueError("Not enough finite source points for interpolation")
+    points = np.column_stack((flat_lons, flat_lats))
+    linear = LinearNDInterpolator(points, flat_values, fill_value=np.nan)
+    out = np.asarray(linear(target_lons, target_lats), dtype=float)
+    if np.isnan(out).any():
+        nearest = NearestNDInterpolator(points, flat_values)
+        fill = np.asarray(nearest(target_lons, target_lats), dtype=float)
+        out = np.where(np.isfinite(out), out, fill)
+    return out
+
+
+def interp_file_to_nr(path: Path, var_name: str, level: int | None, scale: float, nr_lats: np.ndarray, nr_lons: np.ndarray) -> np.ndarray:
+    src_lats, src_lons = read_grid_for_field(path, var_name)
+    src_values = read_field(path, var_name, level, scale)
+    if src_values.shape != src_lats.shape:
+        raise ValueError(f"{path}: {var_name} shape {src_values.shape} does not match grid {src_lats.shape}")
+    return interp_to_targets(src_lats, src_lons, src_values, nr_lats, nr_lons)
+
+
+def member_file_value_at_nearest_grid(
+    path: Path,
+    var_name: str,
+    level: int | None,
+    scale: float,
+    reference_lat: float,
+    reference_lon: float,
+) -> float:
+    lats, lons = read_grid_for_field(path, var_name)
+    values = read_field(path, var_name, level, scale)
+    if values.shape != lats.shape:
+        raise ValueError(f"{path}: {var_name} shape {values.shape} does not match grid {lats.shape}")
+    valid = np.isfinite(lats) & np.isfinite(lons) & np.isfinite(values)
+    if not np.any(valid):
+        raise ValueError(f"{path}: no finite {var_name} values for nearest-grid lookup")
+    dist = latlon_distance_km(lats, lons, reference_lat, reference_lon)
+    j, i = np.unravel_index(np.nanargmin(np.where(valid, dist, np.nan)), values.shape)
+    return float(values[j, i])
+
+
+def rmse(values: np.ndarray, truth: np.ndarray, mask: np.ndarray) -> float:
+    valid = np.isfinite(values) & np.isfinite(truth) & mask
+    if not np.any(valid):
+        return float("nan")
+    return float(np.sqrt(np.nanmean((values[valid] - truth[valid]) ** 2)))
+
+
+def choose_state_point(
+    nr_lats: np.ndarray,
+    nr_lons: np.ndarray,
+    truth: np.ndarray,
+    score: np.ndarray,
+    region_mask: np.ndarray,
+) -> tuple[float, float, float]:
+    valid = np.isfinite(score) & np.isfinite(truth) & region_mask
+    if not np.any(valid):
+        raise ValueError("No finite score values are available for state-point selection")
+    tmp = np.where(valid, np.abs(score), np.nan)
+    j, i = np.unravel_index(np.nanargmax(tmp), tmp.shape)
+    return float(nr_lats[j, i]), float(nr_lons[j, i]), float(truth[j, i])
+
+
+def nearest_grid_state_point(
+    nr_lats: np.ndarray,
+    nr_lons: np.ndarray,
+    truth: np.ndarray,
+    region_mask: np.ndarray,
+    reference_lat: float,
+    reference_lon: float,
+) -> tuple[float, float, float]:
+    valid = np.isfinite(truth) & region_mask
+    if not np.any(valid):
+        raise ValueError("No finite truth grid points are available for state-point selection")
+    dist = latlon_distance_km(nr_lats, nr_lons, reference_lat, reference_lon)
+    j, i = np.unravel_index(np.nanargmin(np.where(valid, dist, np.nan)), truth.shape)
+    return float(nr_lats[j, i]), float(nr_lons[j, i]), float(truth[j, i])
+
+
+def select_state_point(
+    selection: str,
+    nr_lats: np.ndarray,
+    nr_lons: np.ndarray,
+    truth: np.ndarray,
+    score: np.ndarray,
+    region_mask: np.ndarray,
+    obs_info: ObsSeqInfo | None,
+    explicit_lat: float | None,
+    explicit_lon: float | None,
+    tc_lat: float,
+    tc_lon: float,
+) -> tuple[float, float, float]:
+    if explicit_lat is not None and explicit_lon is not None:
+        return nearest_grid_state_point(nr_lats, nr_lons, truth, region_mask, explicit_lat, explicit_lon)
+    if selection == "tc_center":
+        return nearest_grid_state_point(nr_lats, nr_lons, truth, region_mask, tc_lat, tc_lon)
+    if selection == "obs_nearest":
+        if obs_info is None or obs_info.lat is None or obs_info.lon is None:
+            warnings.warn("Observation location unavailable; falling back to max_abs_error state point")
+        else:
+            return nearest_grid_state_point(nr_lats, nr_lons, truth, region_mask, obs_info.lat, obs_info.lon)
+    return choose_state_point(nr_lats, nr_lons, truth, score, region_mask)
+
+
+def calculate_run(
+    filt: str,
+    run_dir: Path,
+    domain: str,
+    members: list[int],
+    output_prefixes: list[str],
+    var_name: str,
+    level: int | None,
+    scale: float,
+    nr_lats: np.ndarray,
+    nr_lons: np.ndarray,
+    prior_mean_on_nr: np.ndarray,
+    region_mask: np.ndarray,
+) -> RunResult:
+    mean_file = find_mean_file(run_dir, domain)
+    mean_on_nr = interp_file_to_nr(mean_file, var_name, level, scale, nr_lats, nr_lons)
+    increment = mean_on_nr - prior_mean_on_nr
+    obs_space = parse_obs_space_log(run_dir / "test.out", members)
+    return RunResult(
+        filt=filt,
+        run_dir=run_dir,
+        mean_file=mean_file,
+        increment_on_nr=np.where(region_mask, increment, np.nan),
+        mean_on_nr=np.where(region_mask, mean_on_nr, np.nan),
+        rms=rmse(mean_on_nr, prior_mean_on_nr, region_mask),
+        obs_space=obs_space,
+    )
+
+
+def member_values_at_point(
+    run_dir: Path,
+    domain: str,
+    members: list[int],
+    prefixes: list[str],
+    var_name: str,
+    level: int | None,
+    scale: float,
+    lat: float,
+    lon: float,
+) -> np.ndarray | None:
+    values = []
+    missing = []
+    for member in members:
+        path = find_member_file(run_dir, domain, member, prefixes)
+        if path is None:
+            missing.append(member)
+            continue
+        values.append(member_file_value_at_nearest_grid(path, var_name, level, scale, lat, lon))
+    if missing:
+        warnings.warn(f"{run_dir}: missing {len(missing)} member files for prefixes {prefixes}")
+    if not values:
+        return None
+    return np.asarray(values, dtype=float)
 
 
 def configure_matplotlib() -> None:
@@ -289,7 +930,7 @@ def gaussian_kde_curve(values: np.ndarray, grid: np.ndarray) -> np.ndarray:
     return np.nanmean(np.exp(-0.5 * z * z), axis=1) / (bandwidth * math.sqrt(2.0 * math.pi))
 
 
-def observation_likelihood_std(obs_info: base.ObsSeqInfo | None) -> float:
+def observation_likelihood_std(obs_info: ObsSeqInfo | None) -> float:
     if OBS_LIKELIHOOD_STD is not None:
         obs_std = float(OBS_LIKELIHOOD_STD)
         if not np.isfinite(obs_std) or obs_std <= 0:
@@ -313,16 +954,11 @@ def get_firstguess_dir(domain: str) -> Path:
 
 
 def get_obs_source(obs_point: int, fallback_run_dir: Path) -> Path:
-    old = base.OBS_SOURCE_PATH
-    try:
-        base.OBS_SOURCE_PATH = OBS_SOURCE_PATH
-        return base.resolve_obs_source(obs_point, fallback_run_dir)
-    finally:
-        base.OBS_SOURCE_PATH = old
+    return resolve_obs_source(obs_point, fallback_run_dir)
 
 
 def bundle_for_result(
-    result: base.RunResult,
+    result: RunResult,
     firstguess_dir: Path,
     domain: str,
     members: list[int],
@@ -337,7 +973,7 @@ def bundle_for_result(
     if obs_prior is None or obs_increment is None:
         return None
 
-    state_prior = base.member_values_at_point(
+    state_prior = member_values_at_point(
         firstguess_dir,
         domain,
         members,
@@ -348,7 +984,7 @@ def bundle_for_result(
         state_lat,
         state_lon,
     )
-    state_post = base.member_values_at_point(
+    state_post = member_values_at_point(
         result.run_dir,
         domain,
         members,
@@ -539,23 +1175,23 @@ def plot_obs_marginal_panel(ax: plt.Axes, bundle: PlotBundle, obs_value: float |
 
 
 def make_figure(obs_point: int, domain: str, nr_file: Path, members: list[int], scale: float, data_root: Path) -> Path:
-    nr_lats, nr_lons = base.read_grid_for_field(nr_file, VAR_NAME)
-    nr_truth = base.read_field(nr_file, VAR_NAME, LEVEL, scale)
-    tc_lat, tc_lon, tc_pressure, center_name = base.tc_center_from_nr(nr_file)
-    region_mask = base.tc_square_mask(nr_lats, nr_lons, tc_lat, tc_lon, TC_HALF_WIDTH_KM)
+    nr_lats, nr_lons = read_grid_for_field(nr_file, VAR_NAME)
+    nr_truth = read_field(nr_file, VAR_NAME, LEVEL, scale)
+    tc_lat, tc_lon, tc_pressure, center_name = tc_center_from_nr(nr_file)
+    region_mask = tc_square_mask(nr_lats, nr_lons, tc_lat, tc_lon, TC_HALF_WIDTH_KM)
     if not np.any(region_mask):
         raise ValueError(f"No NR grid points inside half-width {TC_HALF_WIDTH_KM:g} km")
 
-    run_dirs = {filt: base.resolve_run_dir(data_root, filt, obs_point) for filt in FILTERS}
+    run_dirs = {filt: resolve_run_dir(data_root, filt, obs_point) for filt in FILTERS}
     obs_source = get_obs_source(obs_point, next(iter(run_dirs.values())))
-    obs_info = base.find_obs_seq_info(obs_source, obs_point)
+    obs_info = find_obs_seq_info(obs_source, obs_point)
 
     firstguess_dir = get_firstguess_dir(domain)
-    prior_mean_file = base.find_firstguess_mean_file(firstguess_dir, domain)
-    prior_mean_on_nr = base.interp_file_to_nr(prior_mean_file, VAR_NAME, LEVEL, scale, nr_lats, nr_lons)
+    prior_mean_file = find_firstguess_mean_file(firstguess_dir, domain)
+    prior_mean_on_nr = interp_file_to_nr(prior_mean_file, VAR_NAME, LEVEL, scale, nr_lats, nr_lons)
 
     results = [
-        base.calculate_run(
+        calculate_run(
             filt,
             run_dir,
             domain,
@@ -572,7 +1208,7 @@ def make_figure(obs_point: int, domain: str, nr_file: Path, members: list[int], 
         for filt, run_dir in run_dirs.items()
     ]
 
-    state_lat, state_lon, state_truth = base.select_state_point(
+    state_lat, state_lon, state_truth = select_state_point(
         STATE_SELECTION,
         nr_lats,
         nr_lons,
@@ -638,14 +1274,14 @@ def main() -> None:
     if STATE_SELECTION not in {"max_abs_error", "obs_nearest", "tc_center"}:
         raise ValueError("STATE_SELECTION must be max_abs_error, obs_nearest, or tc_center")
 
-    data_root = base.default_data_root() if DATA_ROOT is None else Path(DATA_ROOT)
+    data_root = default_data_root() if DATA_ROOT is None else Path(DATA_ROOT)
     nr_file_config = None if NR_FILE is None else Path(NR_FILE)
-    scale = base.auto_scale(VAR_NAME) if SCALE == "auto" else float(SCALE)
+    scale = auto_scale(VAR_NAME) if SCALE == "auto" else float(SCALE)
 
-    first_run = base.resolve_run_dir(data_root, FILTERS[0], OBS_POINTS[0])
-    first_mean = base.find_mean_file(first_run, DOMAINS[0])
-    inferred_time = TIME_STRING or base.read_time_string(first_mean)
-    nr_file = base.find_nr_file(nr_file_config, Path(NR_BASE), NR_DOMAIN, inferred_time)
+    first_run = resolve_run_dir(data_root, FILTERS[0], OBS_POINTS[0])
+    first_mean = find_mean_file(first_run, DOMAINS[0])
+    inferred_time = TIME_STRING or read_time_string(first_mean)
+    nr_file = find_nr_file(nr_file_config, Path(NR_BASE), NR_DOMAIN, inferred_time)
 
     print(f"Using NR file: {nr_file}")
     wrote: list[Path] = []
