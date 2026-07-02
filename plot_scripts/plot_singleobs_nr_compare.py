@@ -94,6 +94,7 @@ STATE_SELECTION = "obs_nearest" # max_abs_error, obs_nearest, or tc_center
 OUTPUT_DIR = DEFAULT_OUTPUT_DIR
 FIG_FORMAT = "png"
 DPI = 300
+MAP_COLOR_LEVELS = 21
 
 # File name prefixes used when searching analysis and first-guess directories.
 OUTPUT_PREFIXES = ["postassim", "output", "analysis"]
@@ -846,11 +847,11 @@ def plot_field_panel(
     obs_info: ObsSeqInfo | None,
     state_lat: float,
     state_lon: float,
-    vlim: float,
+    contour_levels: np.ndarray,
 ) -> object:
     field = np.where(region_mask, field, np.nan)
     plot_lons, plot_lats, plot_field = crop_to_mask(nr_lons, nr_lats, field, mask=region_mask)
-    pcm = ax.contourf(plot_lons, plot_lats, plot_field, cmap="RdBu_r", vmin=-vlim, vmax=vlim)
+    pcm = ax.contourf(plot_lons, plot_lats, plot_field, levels=contour_levels, cmap="RdBu_r", extend="both")
     ax.scatter(tc_lon, tc_lat, marker="+", s=70, lw=1.5, c="black", label="TC center")
     if obs_info is not None and obs_info.lat is not None and obs_info.lon is not None:
         ax.scatter(obs_info.lon, obs_info.lat, marker="x", s=44, lw=1.3, c="black", label="obs")
@@ -942,6 +943,7 @@ def make_figure(
     vlim = float(np.nanpercentile(np.abs(finite_map_values), 98)) if finite_map_values.size else 1.0
     if not np.isfinite(vlim) or vlim == 0:
         vlim = 1.0
+    contour_levels = np.linspace(-vlim, vlim, MAP_COLOR_LEVELS)
 
     configure_matplotlib()
     ncols = len(results) + 1
@@ -960,7 +962,7 @@ def make_figure(
         obs_info,
         state_lat,
         state_lon,
-        vlim,
+        contour_levels,
     )
 
     for col, result in enumerate(results):
@@ -993,10 +995,16 @@ def make_figure(
             obs_info,
             state_lat,
             state_lon,
-            vlim,
+            contour_levels,
         )
         if plot_col == ncols - 1:
-            fig.colorbar(pcm, ax=axs[1, :], shrink=0.88, label=f"{VAR_LABELS.get(VAR_NAME, VAR_NAME)} difference")
+            fig.colorbar(
+                pcm,
+                ax=axs[1, :],
+                shrink=0.88,
+                ticks=np.linspace(-vlim, vlim, 5),
+                label=f"{VAR_LABELS.get(VAR_NAME, VAR_NAME)} difference",
+            )
 
     scatter_legend_ax = axs[0, 1] if len(results) else axs[0, 0]
     if scatter_legend_ax.get_legend_handles_labels()[0]:
