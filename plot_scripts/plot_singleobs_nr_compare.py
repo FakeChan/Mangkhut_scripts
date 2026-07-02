@@ -834,9 +834,10 @@ def plot_scatter_panel(
         add_axis_to_point_guides(ax, x, y, color)
 
 
-def plot_error_panel(
+def plot_field_panel(
     ax: plt.Axes,
-    result: RunResult,
+    field: np.ndarray,
+    title: str,
     nr_lats: np.ndarray,
     nr_lons: np.ndarray,
     region_mask: np.ndarray,
@@ -846,15 +847,15 @@ def plot_error_panel(
     state_lat: float,
     state_lon: float,
     vlim: float,
-) -> None:
-    field = np.where(region_mask, result.increment_on_nr, np.nan)
+) -> object:
+    field = np.where(region_mask, field, np.nan)
     plot_lons, plot_lats, plot_field = crop_to_mask(nr_lons, nr_lats, field, mask=region_mask)
     pcm = ax.contourf(plot_lons, plot_lats, plot_field, cmap="RdBu_r", vmin=-vlim, vmax=vlim)
     ax.scatter(tc_lon, tc_lat, marker="+", s=70, lw=1.5, c="black", label="TC center")
     if obs_info is not None and obs_info.lat is not None and obs_info.lon is not None:
         ax.scatter(obs_info.lon, obs_info.lat, marker="x", s=44, lw=1.3, c="black", label="obs")
     ax.scatter(state_lon, state_lat, marker="v", s=42, c="white", edgecolors="black", linewidths=0.8, label="state")
-    ax.set_title(f"{FILTER_LABELS.get(result.filt, result.filt)} mean - prior mean")
+    ax.set_title(title)
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")
     ax.set_xlim(float(np.nanmin(plot_lons)), float(np.nanmax(plot_lons)))
@@ -894,6 +895,8 @@ def make_figure(
     prior_mean_file = find_firstguess_mean_file(firstguess_dir, domain)
     print(f"Prior mean for {domain}: {prior_mean_file}")
     prior_mean_on_nr = interp_file_to_nr(prior_mean_file, VAR_NAME, LEVEL, scale, nr_lats, nr_lons)
+    nr_prior_difference = np.where(region_mask, nr_truth - prior_mean_on_nr, np.nan)
+    prior_rms = rmse(prior_mean_on_nr, nr_truth, region_mask)
 
     results = [
         calculate_run(
@@ -929,18 +932,41 @@ def make_figure(
     )
     print(f"State grid point: lat={state_lat}, lon={state_lon}, NR value={state_truth}")
 
-    finite_increments = np.concatenate([r.increment_on_nr[np.isfinite(r.increment_on_nr) & region_mask].ravel() for r in results])
-    vlim = float(np.nanpercentile(np.abs(finite_increments), 98)) if finite_increments.size else 1.0
+    map_fields = [nr_prior_difference] + [r.increment_on_nr for r in results]
+    finite_map_values = [
+        field[np.isfinite(field) & region_mask].ravel()
+        for field in map_fields
+        if np.any(np.isfinite(field) & region_mask)
+    ]
+    finite_map_values = np.concatenate(finite_map_values) if finite_map_values else np.asarray([], dtype=float)
+    vlim = float(np.nanpercentile(np.abs(finite_map_values), 98)) if finite_map_values.size else 1.0
     if not np.isfinite(vlim) or vlim == 0:
         vlim = 1.0
 
     configure_matplotlib()
-    ncols = len(results)
+    ncols = len(results) + 1
     fig, axs = plt.subplots(2, ncols, figsize=(4.3 * ncols, 7.0), squeeze=False, constrained_layout=True)
 
+    axs[0, 0].set_axis_off()
+    pcm = plot_field_panel(
+        axs[1, 0],
+        nr_prior_difference,
+        f"NR - prior mean\nRMS={prior_rms:.3g}",
+        nr_lats,
+        nr_lons,
+        region_mask,
+        tc_lat,
+        tc_lon,
+        obs_info,
+        state_lat,
+        state_lon,
+        vlim,
+    )
+
     for col, result in enumerate(results):
+        plot_col = col + 1
         plot_scatter_panel(
-            axs[0, col],
+            axs[0, plot_col],
             result,
             firstguess_dir,
             domain,
@@ -955,9 +981,10 @@ def make_figure(
             state_truth,
             obs_info,
         )
-        pcm = plot_error_panel(
-            axs[1, col],
-            result,
+        pcm = plot_field_panel(
+            axs[1, plot_col],
+            result.increment_on_nr,
+            f"{FILTER_LABELS.get(result.filt, result.filt)} mean - prior mean",
             nr_lats,
             nr_lons,
             region_mask,
@@ -968,11 +995,12 @@ def make_figure(
             state_lon,
             vlim,
         )
-        if col == ncols - 1:
-            fig.colorbar(pcm, ax=axs[1, :], shrink=0.88, label=f"{VAR_LABELS.get(VAR_NAME, VAR_NAME)} increment")
+        if plot_col == ncols - 1:
+            fig.colorbar(pcm, ax=axs[1, :], shrink=0.88, label=f"{VAR_LABELS.get(VAR_NAME, VAR_NAME)} difference")
 
-    if axs[0, 0].get_legend_handles_labels()[0]:
-        axs[0, 0].legend(loc="best", fontsize=7)
+    scatter_legend_ax = axs[0, 1] if len(results) else axs[0, 0]
+    if scatter_legend_ax.get_legend_handles_labels()[0]:
+        scatter_legend_ax.legend(loc="best", fontsize=7)
     if axs[1, 0].get_legend_handles_labels()[0]:
         axs[1, 0].legend(loc="best", fontsize=7)
 
