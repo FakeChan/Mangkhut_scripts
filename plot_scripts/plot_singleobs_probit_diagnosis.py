@@ -172,6 +172,8 @@ class PpiJointData:
     obs_post: np.ndarray
     state_prior: np.ndarray
     state_post: np.ndarray
+    obs_truth: float | None
+    state_truth: float | None
     obs_note: str
     reg_note: str
     ppi_dist: str
@@ -1032,6 +1034,9 @@ def ppi_axis_limit_from_data(ppi_data: list[PpiJointData]) -> float:
             finite = values[np.isfinite(values)]
             if finite.size:
                 finite_values.append(finite)
+        truth_values = [value for value in (data.obs_truth, data.state_truth) if value is not None and np.isfinite(value)]
+        if truth_values:
+            finite_values.append(np.asarray(truth_values, dtype=float))
     if not finite_values:
         return 3.2
     values = np.concatenate(finite_values)
@@ -1155,6 +1160,15 @@ def annotate_fit(ax: plt.Axes, x: np.ndarray, y: np.ndarray, color: str = "0.25"
     )
 
 
+def add_axis_to_point_guides(ax: plt.Axes, x: float, y: float, color: str) -> None:
+    if not np.isfinite(x) or not np.isfinite(y):
+        return
+    xmin, _ = ax.get_xlim()
+    ymin, _ = ax.get_ylim()
+    ax.plot([x, x], [ymin, y], color=color, lw=0.8, ls="--", alpha=0.8, zorder=1)
+    ax.plot([xmin, x], [y, y], color=color, lw=0.8, ls="--", alpha=0.8, zorder=1)
+
+
 def plot_physical_joint_update_panel(
     ax: plt.Axes,
     bundle: PlotBundle,
@@ -1166,6 +1180,7 @@ def plot_physical_joint_update_panel(
     post_color = "#57a773"
     line_color = "#48b9c7"
     truth_color = "#d73027"
+    guide_points: list[tuple[float, float, str]] = []
 
     for xo, xp, yo, yp in zip(bundle.obs_prior, bundle.obs_post, bundle.state_prior, bundle.state_post):
         if np.all(np.isfinite([xo, xp, yo, yp])):
@@ -1173,21 +1188,37 @@ def plot_physical_joint_update_panel(
 
     ax.scatter(bundle.obs_prior, bundle.state_prior, s=16, color=prior_color, alpha=0.78, label="prior", zorder=2)
     ax.scatter(bundle.obs_post, bundle.state_post, s=16, color=post_color, alpha=0.78, label="posterior", zorder=3)
+    prior_mean_x = float(np.nanmean(bundle.obs_prior))
+    prior_mean_y = float(np.nanmean(bundle.state_prior))
+    post_mean_x = float(np.nanmean(bundle.obs_post))
+    post_mean_y = float(np.nanmean(bundle.state_post))
+    ax.scatter(prior_mean_x, prior_mean_y, s=42, marker="s", color=prior_color, label="prior mean", zorder=4)
+    ax.scatter(post_mean_x, post_mean_y, s=42, marker="s", color=post_color, label="posterior mean", zorder=4)
+    guide_points.append((prior_mean_x, prior_mean_y, prior_color))
+    guide_points.append((post_mean_x, post_mean_y, post_color))
     annotate_fit(ax, bundle.obs_prior, bundle.state_prior, color=prior_color)
     if obs_value is not None and np.isfinite(obs_value) and np.isfinite(state_truth):
-        ax.scatter(obs_value, state_truth, s=58, marker="v", color=truth_color, label="obs/NR", zorder=4)
+        ax.scatter(obs_value, state_truth, s=58, marker="v", color=truth_color, label="NR", zorder=5)
+        guide_points.append((float(obs_value), float(state_truth), truth_color))
 
     ax.set_title(f"{FILTER_LABELS.get(bundle.result.filt, bundle.result.filt)} physical-space joint update")
     ax.set_xlabel("Observed quantity H(x)")
     ax.set_ylabel(VAR_LABELS.get(VAR_NAME, VAR_NAME))
     ax.ticklabel_format(axis="y", style="sci", scilimits=(-3, 3))
     ax.grid(True, color="0.9", lw=0.5)
+    ax.autoscale_view()
+    for x, y, color in guide_points:
+        add_axis_to_point_guides(ax, x, y, color)
     handles, labels = ax.get_legend_handles_labels()
     if handles:
         ax.legend(handles, labels, loc="best", fontsize=6)
 
 
-def compute_ppi_joint_data(bundle: PlotBundle) -> PpiJointData:
+def compute_ppi_joint_data(
+    bundle: PlotBundle,
+    obs_value: float | None = None,
+    state_truth: float | None = None,
+) -> PpiJointData:
     ppi_dist = ppi_dist_for_filter(bundle.result.filt)
     if should_use_logged_obs_ppi(bundle.result.filt, bundle.probit_prior, bundle.probit_post):
         obs_prior_ppi = bundle.probit_prior
@@ -1211,11 +1242,22 @@ def compute_ppi_joint_data(bundle: PlotBundle) -> PpiJointData:
     else:
         reg_note = "PPI reg unavailable"
 
+    obs_truth_ppi = None
+    state_truth_ppi = None
+    if obs_value is not None and np.isfinite(obs_value):
+        obs_truth_arr = values_to_ppi_from_prior(np.asarray([obs_value], dtype=float), bundle.obs_prior, ppi_dist)
+        obs_truth_ppi = float(obs_truth_arr[0]) if np.isfinite(obs_truth_arr[0]) else None
+    if state_truth is not None and np.isfinite(state_truth):
+        state_truth_arr = values_to_ppi_from_prior(np.asarray([state_truth], dtype=float), bundle.state_prior, ppi_dist)
+        state_truth_ppi = float(state_truth_arr[0]) if np.isfinite(state_truth_arr[0]) else None
+
     return PpiJointData(
         obs_prior=obs_prior_ppi,
         obs_post=obs_post_ppi,
         state_prior=state_prior_ppi,
         state_post=state_post_ppi,
+        obs_truth=obs_truth_ppi,
+        state_truth=state_truth_ppi,
         obs_note=obs_note,
         reg_note=reg_note,
         ppi_dist=ppi_dist,
@@ -1227,11 +1269,24 @@ def plot_ppi_joint_panel(ax: plt.Axes, ppi_data: PpiJointData, axis_limit: float
     prior_color = "#7b5fc8"
     post_color = "#57a773"
     line_color = "#48b9c7"
+    truth_color = "#d73027"
+    guide_points: list[tuple[float, float, str]] = []
     for xo, xp, yo, yp in zip(ppi_data.obs_prior, ppi_data.obs_post, ppi_data.state_prior, ppi_data.state_post):
         if np.all(np.isfinite([xo, xp, yo, yp])):
             ax.plot([xo, xp], [yo, yp], color=line_color, lw=0.65, alpha=0.7, zorder=1)
     ax.scatter(ppi_data.obs_prior, ppi_data.state_prior, s=16, color=prior_color, alpha=0.78, label="prior", zorder=2)
     ax.scatter(ppi_data.obs_post, ppi_data.state_post, s=16, color=post_color, alpha=0.78, label="posterior", zorder=3)
+    prior_mean_x = float(np.nanmean(ppi_data.obs_prior))
+    prior_mean_y = float(np.nanmean(ppi_data.state_prior))
+    post_mean_x = float(np.nanmean(ppi_data.obs_post))
+    post_mean_y = float(np.nanmean(ppi_data.state_post))
+    ax.scatter(prior_mean_x, prior_mean_y, s=42, marker="s", color=prior_color, label="prior mean", zorder=4)
+    ax.scatter(post_mean_x, post_mean_y, s=42, marker="s", color=post_color, label="posterior mean", zorder=4)
+    guide_points.append((prior_mean_x, prior_mean_y, prior_color))
+    guide_points.append((post_mean_x, post_mean_y, post_color))
+    if ppi_data.obs_truth is not None and ppi_data.state_truth is not None:
+        ax.scatter(ppi_data.obs_truth, ppi_data.state_truth, s=58, marker="v", color=truth_color, label="NR", zorder=5)
+        guide_points.append((ppi_data.obs_truth, ppi_data.state_truth, truth_color))
     annotate_fit(ax, ppi_data.obs_prior, ppi_data.state_prior, color=prior_color)
 
     ax.axhline(0, color="0.82", lw=0.7)
@@ -1240,6 +1295,8 @@ def plot_ppi_joint_panel(ax: plt.Axes, ppi_data: PpiJointData, axis_limit: float
     ax.set_xlabel(f"PPI transformed observed ({ppi_data.obs_note})")
     ax.set_ylabel(f"PPI transformed state ({ppi_data.ppi_dist} prior CDF)")
     set_ppi_axis_limit(ax, axis_limit)
+    for x, y, color in guide_points:
+        add_axis_to_point_guides(ax, x, y, color)
     ax.grid(True, color="0.9", lw=0.5)
     handles, labels = ax.get_legend_handles_labels()
     if handles:
@@ -1367,7 +1424,7 @@ def make_figure(obs_point: int, domain: str, nr_file: Path, members: list[int], 
 
     obs_std = observation_likelihood_std(obs_info)
     obs_value = obs_info.obs_value if obs_info is not None else None
-    ppi_data = [compute_ppi_joint_data(bundle) for bundle in bundles]
+    ppi_data = [compute_ppi_joint_data(bundle, obs_value, state_truth) for bundle in bundles]
     ppi_axis_limit = ppi_axis_limit_from_data(ppi_data)
 
     configure_matplotlib()
