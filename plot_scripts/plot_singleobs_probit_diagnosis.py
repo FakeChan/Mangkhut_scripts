@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Plot Jeff Anderson-style single-observation PPI diagnostics.
+Plot single-observation assimilation diagnostics.
 
 The figure is designed to explain why one single-observation assimilation
 improves or degrades the state estimate:
 
 1. physical-space joint update: obs increment and state-variable increment,
-2. joint PPI/probit-space prior and posterior distribution,
+2. O-B and O-A rank-histogram distributions with fitted Gaussian curves,
 3. observation marginal: prior/posterior H(x) distributions and likelihood.
 
 The script is self-contained and can be copied without plot_singleobs_nr_compare.py.
@@ -814,6 +814,54 @@ def normal_fit_pdf(values: np.ndarray, grid: np.ndarray) -> tuple[np.ndarray, fl
     return normal_pdf(grid, mean, std), mean, std
 
 
+def compute_observation_innovations(
+    bundle: PlotBundle,
+    obs_value: float | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return member-wise O-B and O-A using the same observation value."""
+    obs_prior, obs_post = align_member_arrays(bundle.obs_prior, bundle.obs_post)
+    if obs_value is None or not np.isfinite(obs_value):
+        empty = np.full(obs_prior.shape, np.nan, dtype=float)
+        return empty, empty.copy()
+    return float(obs_value) - obs_prior, float(obs_value) - obs_post
+
+
+def innovation_grid_from_bundles(
+    bundles: list[PlotBundle],
+    obs_value: float | None,
+    points: int = 600,
+) -> np.ndarray:
+    """Build one innovation axis shared by all filter panels."""
+    series: list[np.ndarray] = []
+    for bundle in bundles:
+        omb, oma = compute_observation_innovations(bundle, obs_value)
+        series.extend([omb[np.isfinite(omb)], oma[np.isfinite(oma)]])
+    series = [values for values in series if values.size]
+    if not series:
+        return np.linspace(-1.0, 1.0, points)
+
+    all_values = np.concatenate(series)
+    lower = min(float(np.nanmin(all_values)), 0.0)
+    upper = max(float(np.nanmax(all_values)), 0.0)
+    for values in series:
+        if values.size < 2:
+            continue
+        mean = float(np.nanmean(values))
+        std = float(np.nanstd(values, ddof=1))
+        if np.isfinite(std) and std > 0:
+            lower = min(lower, mean - 4.0 * std)
+            upper = max(upper, mean + 4.0 * std)
+
+    span = upper - lower
+    if not np.isfinite(span) or span <= 0:
+        scale = max(abs(lower), abs(upper), 1.0)
+        lower -= 0.5 * scale
+        upper += 0.5 * scale
+        span = upper - lower
+    pad = 0.06 * span
+    return np.linspace(lower - pad, upper + pad, points)
+
+
 def bnrh_sorted_quantiles(sorted_values: np.ndarray) -> np.ndarray:
     """DART_LAB ens_quantiles.m for the unbounded RHF/BNRH case."""
     n = sorted_values.size
@@ -1303,6 +1351,79 @@ def plot_ppi_joint_panel(ax: plt.Axes, ppi_data: PpiJointData, axis_limit: float
         ax.legend(handles, labels, loc="best", fontsize=6)
 
 
+def plot_innovation_rank_histogram_panel(
+    ax: plt.Axes,
+    bundle: PlotBundle,
+    obs_value: float | None,
+    grid: np.ndarray,
+) -> float:
+    """Plot O-B/O-A RHF densities and Gaussian fits for one filter."""
+    prior_color = "#7b5fc8"
+    post_color = "#57a773"
+    omb, oma = compute_observation_innovations(bundle, obs_value)
+    finite_omb = omb[np.isfinite(omb)]
+    finite_oma = oma[np.isfinite(oma)]
+    if finite_omb.size < 2 or finite_oma.size < 2:
+        ax.text(0.5, 0.5, "Insufficient O-B/O-A values", ha="center", va="center", transform=ax.transAxes)
+        ax.set_axis_off()
+        return 0.0
+
+    omb_rhf = bnrh_pdf_unbounded(grid, finite_omb)
+    oma_rhf = bnrh_pdf_unbounded(grid, finite_oma)
+    omb_gaussian, omb_mean, omb_std = normal_fit_pdf(finite_omb, grid)
+    oma_gaussian, oma_mean, oma_std = normal_fit_pdf(finite_oma, grid)
+
+    ax.plot(
+        grid,
+        omb_rhf,
+        color=prior_color,
+        lw=1.4,
+        drawstyle="steps-mid",
+        label="O-B rank histogram",
+    )
+    ax.plot(
+        grid,
+        omb_gaussian,
+        color=prior_color,
+        lw=1.4,
+        ls="--",
+        label=rf"O-B Gaussian ($\mu$={omb_mean:.3g}, $\sigma$={omb_std:.3g})",
+    )
+    ax.plot(
+        grid,
+        oma_rhf,
+        color=post_color,
+        lw=1.4,
+        drawstyle="steps-mid",
+        label="O-A rank histogram",
+    )
+    ax.plot(
+        grid,
+        oma_gaussian,
+        color=post_color,
+        lw=1.4,
+        ls="--",
+        label=rf"O-A Gaussian ($\mu$={oma_mean:.3g}, $\sigma$={oma_std:.3g})",
+    )
+
+    ax.axvline(0.0, color="0.25", lw=0.8, ls=":", zorder=0)
+    ax.set_xlim(float(grid[0]), float(grid[-1]))
+    ax.set_title(f"{FILTER_LABELS.get(bundle.result.filt, bundle.result.filt)} O-B / O-A distributions")
+    ax.set_xlabel(r"Innovation ($y-H(x)$)")
+    ax.set_ylabel("density")
+    ax.grid(True, color="0.9", lw=0.5)
+    ax.legend(loc="best", fontsize=6)
+
+    finite_density_parts = [
+        values[np.isfinite(values)]
+        for values in (omb_rhf, omb_gaussian, oma_rhf, oma_gaussian)
+        if np.any(np.isfinite(values))
+    ]
+    if not finite_density_parts:
+        return 0.0
+    return float(np.nanmax(np.concatenate(finite_density_parts)))
+
+
 def plot_obs_marginal_panel(ax: plt.Axes, bundle: PlotBundle, obs_value: float | None, obs_std: float) -> None:
     """Plot prior/posterior H(x) marginal distributions and observation likelihood."""
     all_values = np.concatenate([bundle.obs_prior[np.isfinite(bundle.obs_prior)], bundle.obs_post[np.isfinite(bundle.obs_post)]])
@@ -1424,17 +1545,24 @@ def make_figure(obs_point: int, domain: str, nr_file: Path, members: list[int], 
 
     obs_std = observation_likelihood_std(obs_info)
     obs_value = obs_info.obs_value if obs_info is not None else None
-    ppi_data = [compute_ppi_joint_data(bundle, obs_value, state_truth) for bundle in bundles]
-    ppi_axis_limit = ppi_axis_limit_from_data(ppi_data)
+    innovation_grid = innovation_grid_from_bundles(bundles, obs_value)
 
     configure_matplotlib()
     ncols = len(bundles)
     fig, axs = plt.subplots(3, ncols, figsize=(4.35 * ncols, 9.2), squeeze=False, constrained_layout=True)
 
-    for col, (bundle, ppi_panel_data) in enumerate(zip(bundles, ppi_data)):
+    innovation_density_maxima = []
+    for col, bundle in enumerate(bundles):
         plot_physical_joint_update_panel(axs[0, col], bundle, obs_value, state_truth)
-        plot_ppi_joint_panel(axs[1, col], ppi_panel_data, ppi_axis_limit)
+        innovation_density_maxima.append(
+            plot_innovation_rank_histogram_panel(axs[1, col], bundle, obs_value, innovation_grid)
+        )
         plot_obs_marginal_panel(axs[2, col], bundle, obs_value, obs_std)
+    shared_density_max = max(innovation_density_maxima, default=0.0)
+    if np.isfinite(shared_density_max) and shared_density_max > 0:
+        for ax in axs[1, :]:
+            if ax.axison:
+                ax.set_ylim(0.0, 1.06 * shared_density_max)
 
     fig.suptitle(
         (
@@ -1470,7 +1598,7 @@ def main() -> None:
     wrote: list[Path] = []
     for obs_point in OBS_POINTS:
         for domain in DOMAINS:
-            print(f"Plotting probit diagnosis for obs_seq{obs_point}, {domain}")
+            print(f"Plotting single-observation diagnosis for obs_seq{obs_point}, {domain}")
             wrote.append(make_figure(obs_point, domain, nr_file, MEMBERS, scale, data_root))
     print("Wrote figures:")
     for path in wrote:
