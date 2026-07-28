@@ -28,12 +28,12 @@ from scipy.interpolate import LinearNDInterpolator
 
 BASE_DIR = Path("/scratch/lililei1/kcfu/tc_mangkhut/cycle_test")
 NR_BASE = Path("/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/2domain")
-MEMBER_DOMAIN = "d01"
+MEMBER_DOMAIN = "d02"
 NR_DOMAIN = "d02"
 START_TIME = "2018-09-10_01:00:00"
 END_TIME = "2018-09-10_06:00:00"
 STEP_MINUTES = 60
-NR_COARSEN_FACTOR = 5
+NR_COARSEN_FACTOR = 1
 TC_RADIUS_KM = 150.0
 CENTER_PRESSURE_VAR = "PSFC"
 
@@ -80,12 +80,12 @@ TARGET_VARIABLE = {
     "vertical_level": None,
     "scale": 1,
     "power": 1.0,
-    "unit": "k*m/s",
+    "unit": "k",
     "experiments": EXPERIMENTS,
     "lat_name": None,
     "lon_name": None,
-    "out_csv": Path("./figs/hfx_rmse_timeseries.csv"),
-    "out_png": Path("./figs/hfx_rmse_timeseries.png"),
+    "out_csv": Path("./figs/hfx_error_timeseries.csv"),
+    "out_png": Path("./figs/hfx_error_timeseries.png"),
 }
 
 # Example for a 3-D atmospheric variable:

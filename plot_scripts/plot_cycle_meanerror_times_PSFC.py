@@ -35,10 +35,10 @@ import xarray as xr
 
 
 DEFAULT_BASE = Path("/scratch/lililei1/kcfu/tc_mangkhut/cycle_test")
-DEFAULT_NR_BASE = Path("/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout")
-DEFAULT_NR_DOMAIN = "d03"
+DEFAULT_NR_BASE = Path("/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/2domain")
+DEFAULT_NR_DOMAIN = "d02"
 EXPERIMENTS = ["6mem_oceanAssim0Run0", "6mem_oceanAssim0Run1", "6mem_oceanAssim1Run1"]
-FILTERS = ["EAKF", "QCF_RHF"]
+FILTERS = ["QCF_RHF"]
 MEMBERS = ["006", "015", "029", "037", "043", "044"]
 
 # Okabe-Ito / colorblind-safe scientific palette.
@@ -263,7 +263,7 @@ def main() -> None:
     parser.add_argument("--nr-domain", default=DEFAULT_NR_DOMAIN, help="NR WRF domain, e.g. d02 or d03")
     parser.add_argument("--start", default="2018-09-10_00:00:00")
     parser.add_argument("--end", default="2018-09-10_06:00:00")
-    parser.add_argument("--step-minutes", type=int, default=30)
+    parser.add_argument("--step-minutes", type=int, default=60)
     parser.add_argument(
         "--mslp-source",
         choices=["auto", "slp", "wrf", "psfc"],

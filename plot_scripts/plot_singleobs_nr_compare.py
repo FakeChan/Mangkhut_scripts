@@ -56,10 +56,13 @@ OBS_POINTS = [nobs]
 if nobs == 640:
     STATE_LAT = 15.2
     STATE_LON = 148.24
-elif nobs == 111:
+elif nobs == 112:
     STATE_LAT = 14.0
     STATE_LON = 147.6
 elif nobs == 361:
+    STATE_LAT = None
+    STATE_LON = None 
+else:
     STATE_LAT = None
     STATE_LON = None
 DOMAINS = ["d01"]
@@ -68,16 +71,16 @@ MEMBERS = list(range(1, 51))
 # Observation source used only for obs location/value.  This can be a single
 # obs_seq file, a directory containing obs_seq.out.111-style files, or a dict
 # such as {111: "/path/to/obs_seq.out.111", 325: "..."}.
-OBS_SOURCE_PATH = "/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/2DART/run_dir"
+OBS_SOURCE_PATH = {111:"/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/2DART/run_dir/obs_seq.out.air.111"}
 
 # First-guess member files used for the prior/state scatter panels.  This can be
 # a single directory containing firstguess_d01.mem001, firstguess_d02.mem001,
 # or a dict such as {"d01": "/path/to/d01/firstguess", "d02": "/path/to/d02/firstguess"}.
-FIRSTGUESS_DIR = "/scratch/lililei1/kcfu/tc_mangkhut/4assimilation/DART/EAKF/obs_seq361"
+FIRSTGUESS_DIR = "/scratch/lililei1/kcfu/tc_mangkhut/4assimilation/DART/QCF_RHF/obs_seq111_air"
 
 # Field to compare with NR.  QVAPOR is automatically converted kg kg-1 -> g kg-1.
-VAR_NAME = "OM_TMP"
-LEVEL = 0
+VAR_NAME = "QVAPOR"
+LEVEL = 12
 SCALE = "auto"
 
 # NR setting.  Set NR_FILE directly when possible.  If NR_FILE is None, the
@@ -490,7 +493,7 @@ def find_obs_seq_info(obs_source: Path, obs_point: int) -> ObsSeqInfo | None:
 
 
 def resolve_run_dir(data_root: Path, filt: str, obs_point: int) -> Path:
-    run_dir = data_root / filt / f"obs_seq{obs_point}"
+    run_dir = data_root / filt / f"obs_seq{obs_point}_air"
     if not run_dir.exists():
         raise FileNotFoundError(run_dir)
     return run_dir

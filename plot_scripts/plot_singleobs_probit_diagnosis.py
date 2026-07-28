@@ -49,7 +49,7 @@ DEFAULT_NR_BASE = Path("/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/2domain"
 #   DATA_ROOT / FILTER / obs_seq{point}
 DATA_ROOT = "/scratch/lililei1/kcfu/tc_mangkhut/4assimilation/DART"  # None: use PROJECT_ROOT/DART, or /DART if it exists.
 FILTERS = ["EAKF", "QCF_RHF"]
-nobs = 111
+nobs = 498
 OBS_POINTS = [nobs]
 
 if nobs == 640:

@@ -59,7 +59,7 @@ DEFAULT_NR_BASE = Path("/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/2domain"
 # =============================================================================
 DATA_ROOT = "/scratch/lililei1/kcfu/tc_mangkhut/4assimilation/DART"
 FILTER_FOR_TIME = "EAKF"
-nobs = 111
+nobs = 498
 OBS_POINTS = [nobs]
 DOMAINS = ["d01"]
 MEMBERS = list(range(1, 51))
