@@ -6,7 +6,7 @@ The figure is designed to explain why one single-observation assimilation
 improves or degrades the state estimate:
 
 1. physical-space joint update: obs increment and state-variable increment,
-2. O-B and O-A rank-histogram distributions with fitted Gaussian curves,
+2. O-B and O-A density histograms with fitted Gaussian curves,
 3. observation marginal: prior/posterior H(x) distributions and likelihood.
 
 The script is self-contained and can be copied without plot_singleobs_nr_compare.py.
@@ -826,6 +826,21 @@ def compute_observation_innovations(
     return float(obs_value) - obs_prior, float(obs_value) - obs_post
 
 
+def innovation_histogram_edges_from_bundles(
+    bundles: list[PlotBundle],
+    obs_value: float | None,
+) -> np.ndarray:
+    """Compute one automatic set of histogram bins from all O-B/O-A samples."""
+    innovation_values: list[np.ndarray] = []
+    for bundle in bundles:
+        omb, oma = compute_observation_innovations(bundle, obs_value)
+        innovation_values.extend([omb[np.isfinite(omb)], oma[np.isfinite(oma)]])
+    innovation_values = [values for values in innovation_values if values.size]
+    if not innovation_values:
+        return np.linspace(-1.0, 1.0, 11)
+    return np.histogram_bin_edges(np.concatenate(innovation_values), bins="auto")
+
+
 def innovation_grid_from_bundles(
     bundles: list[PlotBundle],
     obs_value: float | None,
@@ -1351,13 +1366,14 @@ def plot_ppi_joint_panel(ax: plt.Axes, ppi_data: PpiJointData, axis_limit: float
         ax.legend(handles, labels, loc="best", fontsize=6)
 
 
-def plot_innovation_rank_histogram_panel(
+def plot_innovation_histogram_panel(
     ax: plt.Axes,
     bundle: PlotBundle,
     obs_value: float | None,
+    bin_edges: np.ndarray,
     grid: np.ndarray,
 ) -> float:
-    """Plot O-B/O-A RHF densities and Gaussian fits for one filter."""
+    """Plot O-B/O-A density histograms and Gaussian fits for one filter."""
     prior_color = "#7b5fc8"
     post_color = "#57a773"
     omb, oma = compute_observation_innovations(bundle, obs_value)
@@ -1368,18 +1384,32 @@ def plot_innovation_rank_histogram_panel(
         ax.set_axis_off()
         return 0.0
 
-    omb_rhf = bnrh_pdf_unbounded(grid, finite_omb)
-    oma_rhf = bnrh_pdf_unbounded(grid, finite_oma)
     omb_gaussian, omb_mean, omb_std = normal_fit_pdf(finite_omb, grid)
     oma_gaussian, oma_mean, oma_std = normal_fit_pdf(finite_oma, grid)
 
-    ax.plot(
-        grid,
-        omb_rhf,
+    omb_hist, _, _ = ax.hist(
+        finite_omb,
+        bins=bin_edges,
+        density=True,
         color=prior_color,
-        lw=1.4,
-        drawstyle="steps-mid",
-        label="O-B rank histogram",
+        edgecolor=prior_color,
+        linewidth=0.7,
+        alpha=0.32,
+        histtype="stepfilled",
+        label="O-B histogram",
+        zorder=2,
+    )
+    oma_hist, _, _ = ax.hist(
+        finite_oma,
+        bins=bin_edges,
+        density=True,
+        color=post_color,
+        edgecolor=post_color,
+        linewidth=0.7,
+        alpha=0.32,
+        histtype="stepfilled",
+        label="O-A histogram",
+        zorder=3,
     )
     ax.plot(
         grid,
@@ -1388,14 +1418,7 @@ def plot_innovation_rank_histogram_panel(
         lw=1.4,
         ls="--",
         label=rf"O-B Gaussian ($\mu$={omb_mean:.3g}, $\sigma$={omb_std:.3g})",
-    )
-    ax.plot(
-        grid,
-        oma_rhf,
-        color=post_color,
-        lw=1.4,
-        drawstyle="steps-mid",
-        label="O-A rank histogram",
+        zorder=4,
     )
     ax.plot(
         grid,
@@ -1404,6 +1427,7 @@ def plot_innovation_rank_histogram_panel(
         lw=1.4,
         ls="--",
         label=rf"O-A Gaussian ($\mu$={oma_mean:.3g}, $\sigma$={oma_std:.3g})",
+        zorder=4,
     )
 
     ax.axvline(0.0, color="0.25", lw=0.8, ls=":", zorder=0)
@@ -1416,7 +1440,7 @@ def plot_innovation_rank_histogram_panel(
 
     finite_density_parts = [
         values[np.isfinite(values)]
-        for values in (omb_rhf, omb_gaussian, oma_rhf, oma_gaussian)
+        for values in (omb_hist, omb_gaussian, oma_hist, oma_gaussian)
         if np.any(np.isfinite(values))
     ]
     if not finite_density_parts:
@@ -1545,6 +1569,7 @@ def make_figure(obs_point: int, domain: str, nr_file: Path, members: list[int], 
 
     obs_std = observation_likelihood_std(obs_info)
     obs_value = obs_info.obs_value if obs_info is not None else None
+    innovation_bin_edges = innovation_histogram_edges_from_bundles(bundles, obs_value)
     innovation_grid = innovation_grid_from_bundles(bundles, obs_value)
 
     configure_matplotlib()
@@ -1555,7 +1580,13 @@ def make_figure(obs_point: int, domain: str, nr_file: Path, members: list[int], 
     for col, bundle in enumerate(bundles):
         plot_physical_joint_update_panel(axs[0, col], bundle, obs_value, state_truth)
         innovation_density_maxima.append(
-            plot_innovation_rank_histogram_panel(axs[1, col], bundle, obs_value, innovation_grid)
+            plot_innovation_histogram_panel(
+                axs[1, col],
+                bundle,
+                obs_value,
+                innovation_bin_edges,
+                innovation_grid,
+            )
         )
         plot_obs_marginal_panel(axs[2, col], bundle, obs_value, obs_std)
     shared_density_max = max(innovation_density_maxima, default=0.0)
