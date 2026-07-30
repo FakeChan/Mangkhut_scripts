@@ -27,7 +27,8 @@ Required settings:
   coordinates.
 - `CURRENT_TIME`: full reference time, initially
   `2018-09-10_00:00:00`.
-- `LAG_HOURS`: ordered, unique, nonnegative lead times, initially `[0, 12]`.
+- `MAX_LAG_HOURS`: maximum lead time, initially 12.
+- `LAG_INTERVAL_HOURS`: lead-time interval, initially 3.
 - `MEMBER_START` and `MEMBER_END`: initially 1 and 50.
 - `SENSOR`: initially `AMSUA`.
 - `CHANNEL`: initially 4.
@@ -46,8 +47,10 @@ The current member-state path is:
 {MEM_DIR}/firstguess_{DOMAIN}.mem{nnn}
 ```
 
-Changing `LAG_HOURS` is sufficient to diagnose a different set of lead times.
-The script derives each historical valid time from `CURRENT_TIME`.
+The script derives `LAG_HOURS = [0, 3, 6, 9, 12]` from the initial maximum
+lag and interval, then derives each historical valid time from `CURRENT_TIME`.
+Changing `MAX_LAG_HOURS` or `LAG_INTERVAL_HOURS` is sufficient to diagnose a
+different regular set of lead times.
 
 ## Input Parsing
 
@@ -108,12 +111,15 @@ Hx_k^{f,(m)}(t-\tau)
 This produces the single-time lead-lag diagnostic corresponding to Fig. 2a of
 Lu et al. (2015).
 
-The averaged windows always include the current time. If the configured lags
-are `[0, 12]`, the windows are:
+The averaged windows always include the current time. With the initial
+configuration, the windows are:
 
 ```text
 Ave1 = [t]
-Ave2 = [t - 12 h, t]
+Ave2 = [t - 3 h, t]
+Ave3 = [t - 6 h, t - 3 h, t]
+Ave4 = [t - 9 h, t - 6 h, t - 3 h, t]
+Ave5 = [t - 12 h, t - 9 h, t - 6 h, t - 3 h, t]
 ```
 
 For the first \(L\) configured lead times after sorting them in ascending order:
@@ -162,15 +168,15 @@ writes:
 
 The figure labels positive lag as `Hx leads current OM_TMP`. The averaged panel
 labels each point with its included lead times so irregular choices such as
-`[0, 12]` cannot be mistaken for a regular 3-hour window.
+`[0, 3, 6, 9, 12]` are explicit in the result.
 
 ## Error Handling
 
 Execution stops with an explicit message when:
 
-- lag zero is absent, because all averaged windows must include the current
-  time;
-- a configured lag is negative or duplicated;
+- the maximum lag is negative;
+- the lag interval is not positive;
+- the maximum lag is not an integer multiple of the lag interval;
 - a profile does not contain exactly 676 coordinates;
 - an Hx file is missing or does not contain exactly 676 values;
 - a current member file or required NetCDF variable is missing;
