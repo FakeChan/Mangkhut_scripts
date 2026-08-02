@@ -119,6 +119,28 @@ class Wrf41SfclayrevTests(unittest.TestCase):
         self.assertEqual(result.qfx[0, 0], 0.0)
         self.assertEqual(result.lh[0, 0], 0.0)
 
+    def test_nonconvergence_reports_actual_count_and_worst_point(self):
+        def field(converging: float, nonconverging: float) -> np.ndarray:
+            return np.array([[converging, nonconverging]], dtype=float)
+
+        state = SurfaceState(
+            air_temperature_k=field(299.0, 260.0),
+            surface_temperature_k=field(301.0, 280.0),
+            vapor_mixing_ratio=field(0.018, 0.001),
+            air_pressure_pa=field(95_000.0, 95_000.0),
+            surface_pressure_pa=field(100_000.0, 100_000.0),
+            height_agl_m=field(25.0, 100.0),
+            u_ms=field(8.0, 10.0),
+            v_ms=field(0.0, 0.0),
+            dx_m=1_500.0,
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"1/2 grid points.*max_change=.*index=\(0, 1\).*Ri=",
+        ):
+            revised_mm5_ocean_flux(state, SfclayOptions(isftcflx=0))
+
     def test_shape_mismatch_is_rejected(self):
         state = uniform_surface_state()
         bad = SurfaceState(

@@ -227,6 +227,31 @@ def synthetic_member_dataset(include_ocean: bool = True) -> xr.Dataset:
 
 
 class WrfReaderAndWorkflowTests(unittest.TestCase):
+    def test_surface_solver_excludes_unselected_nonconverging_land_point(self):
+        def field(ocean_value: float, land_value: float) -> np.ndarray:
+            return np.array([[ocean_value, land_value]], dtype=float)
+
+        state = diag.SurfaceState(
+            air_temperature_k=field(299.0, 260.0),
+            surface_temperature_k=field(301.0, 280.0),
+            vapor_mixing_ratio=field(0.018, 0.001),
+            air_pressure_pa=field(95_000.0, 95_000.0),
+            surface_pressure_pa=field(100_000.0, 100_000.0),
+            height_agl_m=field(25.0, 100.0),
+            u_ms=field(8.0, 10.0),
+            v_ms=field(0.0, 0.0),
+            dx_m=1_500.0,
+        )
+
+        selected = diag.select_surface_state(
+            state, np.array([[True, False]])
+        )
+        result = diag.revised_mm5_ocean_flux(selected, diag.SfclayOptions())
+
+        self.assertEqual(selected.air_temperature_k.shape, (1, 1))
+        self.assertEqual(selected.air_temperature_k[0, 0], 299.0)
+        self.assertTrue(np.isfinite(result.lh).all())
+
     def test_surface_reader_only_loads_two_lowest_geopotential_levels(self):
         ds = synthetic_member_dataset(include_ocean=False)
         dims = ds["PH"].dims

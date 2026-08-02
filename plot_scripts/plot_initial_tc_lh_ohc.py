@@ -493,6 +493,30 @@ def calculate_lh_field(ds: xr.Dataset, use_ocean_sst: bool) -> SurfaceFluxResult
     return revised_mm5_ocean_flux(state, SfclayOptions(isftcflx=isftcflx))
 
 
+def select_surface_state(state: SurfaceState, mask: np.ndarray) -> SurfaceState:
+    """Pack selected 2-D points into one row for the ocean-only solver."""
+    selected = np.asarray(mask, dtype=bool)
+    if selected.ndim != 2 or not np.any(selected):
+        raise ValueError("surface-state mask must be a nonempty 2-D array")
+
+    arrays = {
+        name: np.asarray(value, dtype=float)
+        for name, value in state.__dict__.items()
+        if name != "dx_m"
+    }
+    bad_shapes = {
+        name: values.shape
+        for name, values in arrays.items()
+        if values.shape != selected.shape
+    }
+    if bad_shapes:
+        raise ValueError(
+            f"surface-state arrays do not match mask {selected.shape}: {bad_shapes}"
+        )
+    packed = {name: values[selected][None, :] for name, values in arrays.items()}
+    return SurfaceState(**packed, dx_m=state.dx_m)
+
+
 def read_ohc_inputs(
     ds: xr.Dataset,
     y_slice: slice = slice(None),
@@ -736,11 +760,12 @@ def calculate_member_records(
                         y_slice=y_slice,
                         x_slice=x_slice,
                     )
+                    selected_state = select_surface_state(state, local_mask)
                     isftcflx = _physics_attribute(ds, "ISFTCFLX")
                     flux = revised_mm5_ocean_flux(
-                        state, SfclayOptions(isftcflx=isftcflx)
+                        selected_state, SfclayOptions(isftcflx=isftcflx)
                     )
-                    lh_values = flux.lh[local_mask]
+                    lh_values = flux.lh.ravel()
                     if not np.isfinite(lh_values).all():
                         raise ValueError(f"nonfinite LH in selected region: {member_path}")
                     common = {

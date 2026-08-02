@@ -330,17 +330,31 @@ def revised_mm5_ocean_flux(
         target = np.maximum(KARMAN * effective_wind / denom_m, 0.001)
         new_ustar = 0.5 * ustar + 0.5 * target
         new_z0m = _momentum_roughness(new_ustar, options.isftcflx)
-        change = max(
-            float(np.max(np.abs(new_ustar - ustar))),
-            float(np.max(np.abs(new_z0m - z0m))),
-        )
+        ustar_change = np.abs(new_ustar - ustar)
+        z0m_change = np.abs(new_z0m - z0m)
+        point_change = np.maximum(ustar_change, z0m_change)
+        change = float(np.max(point_change))
         ustar, z0m = new_ustar, new_z0m
         if change <= options.tolerance:
             iterations = iteration
             break
     else:
+        unconverged = point_change > options.tolerance
+        unconverged_count = int(np.count_nonzero(unconverged))
+        worst_index = tuple(
+            int(index)
+            for index in np.unravel_index(
+                int(np.argmax(point_change)), point_change.shape
+            )
+        )
         raise RuntimeError(
-            f"Revised-MM5 surface solve failed to converge at {ustar.size} grid points"
+            "Revised-MM5 surface solve failed to converge at "
+            f"{unconverged_count}/{ustar.size} grid points after "
+            f"{options.max_iterations} iterations; "
+            f"max_change={point_change[worst_index]:.6e} at index={worst_index}; "
+            f"ustar_change={ustar_change[worst_index]:.6e}; "
+            f"z0m_change={z0m_change[worst_index]:.6e}; "
+            f"Ri={bulk_ri[worst_index]:.6e}"
         )
 
     zol = _zol_from_ri(bulk_ri, z, z0m)
