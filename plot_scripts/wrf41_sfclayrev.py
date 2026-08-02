@@ -151,50 +151,81 @@ def _integrated_psi(
     return fn(upper) - fn(lower)
 
 
-def _ri_residual(zol: float, ri: float, z: float, z0: float) -> float:
-    zol = 0.0 if zol * ri < 0.0 else zol
-    correction_m = float(
-        _integrated_psi(
-            np.array(zol), np.array(z), np.array(z0), "momentum"
-        )
-    )
-    correction_h = float(
-        _integrated_psi(np.array(zol), np.array(z), np.array(z0), "heat")
-    )
+def _ri_residual(
+    zol: np.ndarray | float,
+    ri: np.ndarray | float,
+    z: np.ndarray | float,
+    z0: np.ndarray | float,
+) -> np.ndarray:
+    zol = np.asarray(zol, dtype=float)
+    ri = np.asarray(ri, dtype=float)
+    z = np.asarray(z, dtype=float)
+    z0 = np.asarray(z0, dtype=float)
+    zol = np.where(zol * ri < 0.0, 0.0, zol)
+    correction_m = _integrated_psi(zol, z, z0, "momentum")
+    correction_h = _integrated_psi(zol, z, z0, "heat")
     logz = np.log((z + z0) / z0)
     return zol * (logz - correction_h) / (logz - correction_m) ** 2 - ri
 
 
 def _zol_from_ri(ri: np.ndarray, z: np.ndarray, z0: np.ndarray) -> np.ndarray:
-    result = np.zeros_like(ri, dtype=float)
-    for index in np.ndindex(ri.shape):
-        target = float(np.clip(ri[index], -250.0, 250.0))
-        if abs(target) < 1.0e-12:
-            continue
-        lo, hi = (-5.0, 0.0) if target < 0.0 else (0.0, 5.0)
-        flo = _ri_residual(lo, target, float(z[index]), float(z0[index]))
-        fhi = _ri_residual(hi, target, float(z[index]), float(z0[index]))
-        for _ in range(20):
-            if flo * fhi <= 0.0:
-                break
-            if target < 0.0:
-                lo *= 2.0
-                flo = _ri_residual(lo, target, float(z[index]), float(z0[index]))
-            else:
-                hi *= 2.0
-                fhi = _ri_residual(hi, target, float(z[index]), float(z0[index]))
-        if flo * fhi > 0.0:
-            raise RuntimeError(f"could not bracket z/L for Ri={target:g}")
-        for _ in range(80):
-            mid = 0.5 * (lo + hi)
-            fmid = _ri_residual(mid, target, float(z[index]), float(z0[index]))
-            if abs(fmid) < 1.0e-10 or abs(hi - lo) < 0.01:
-                break
-            if flo * fmid <= 0.0:
-                hi, fhi = mid, fmid
-            else:
-                lo, flo = mid, fmid
-        result[index] = mid
+    target, height, roughness = np.broadcast_arrays(
+        np.clip(np.asarray(ri, dtype=float), -250.0, 250.0),
+        np.asarray(z, dtype=float),
+        np.asarray(z0, dtype=float),
+    )
+    result = np.zeros_like(target)
+    active = np.abs(target) >= 1.0e-12
+    unstable = target < 0.0
+    lo = np.where(unstable, -5.0, 0.0)
+    hi = np.where(unstable, 0.0, 5.0)
+    flo = _ri_residual(lo, target, height, roughness)
+    fhi = _ri_residual(hi, target, height, roughness)
+
+    for _ in range(20):
+        unbracketed = active & (flo * fhi > 0.0)
+        if not np.any(unbracketed):
+            break
+        expand_lo = unbracketed & unstable
+        expand_hi = unbracketed & ~unstable
+        lo = np.where(expand_lo, lo * 2.0, lo)
+        hi = np.where(expand_hi, hi * 2.0, hi)
+        flo = np.where(
+            expand_lo,
+            _ri_residual(lo, target, height, roughness),
+            flo,
+        )
+        fhi = np.where(
+            expand_hi,
+            _ri_residual(hi, target, height, roughness),
+            fhi,
+        )
+
+    unbracketed = active & (flo * fhi > 0.0)
+    if np.any(unbracketed):
+        failed_target = float(target[unbracketed][0])
+        raise RuntimeError(f"could not bracket z/L for Ri={failed_target:g}")
+
+    working = active.copy()
+    mid = np.zeros_like(target)
+    for _ in range(80):
+        candidate = 0.5 * (lo + hi)
+        fmid = _ri_residual(candidate, target, height, roughness)
+        converged = working & (
+            (np.abs(fmid) < 1.0e-10) | (np.abs(hi - lo) < 0.01)
+        )
+        mid = np.where(working, candidate, mid)
+        remaining = working & ~converged
+        if not np.any(remaining):
+            break
+        replace_hi = remaining & (flo * fmid <= 0.0)
+        replace_lo = remaining & ~replace_hi
+        hi = np.where(replace_hi, candidate, hi)
+        fhi = np.where(replace_hi, fmid, fhi)
+        lo = np.where(replace_lo, candidate, lo)
+        flo = np.where(replace_lo, fmid, flo)
+        working = remaining
+    result = np.where(active, mid, result)
     return result
 
 

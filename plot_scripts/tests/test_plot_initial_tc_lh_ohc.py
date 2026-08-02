@@ -505,6 +505,8 @@ class WrfReaderAndWorkflowTests(unittest.TestCase):
                 experiment_root=root / "experiments",
                 nr_root=root / "nr",
                 output_dir=root / "output",
+                member_domain="d02",
+                nr_domain="d03",
                 filters=("EAKF",),
                 members=("001", "002"),
                 experiments=(

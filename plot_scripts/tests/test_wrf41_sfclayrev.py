@@ -7,6 +7,8 @@ import numpy as np
 from plot_scripts.wrf41_sfclayrev import (
     SfclayOptions,
     SurfaceState,
+    _ri_residual,
+    _zol_from_ri,
     revised_mm5_ocean_flux,
     saturation_mixing_ratio,
 )
@@ -39,6 +41,40 @@ def uniform_surface_state(
 
 
 class Wrf41SfclayrevTests(unittest.TestCase):
+    def test_richardson_residual_evaluates_arrays_in_one_call(self):
+        got = _ri_residual(
+            np.array([-2.5, 0.5, 0.0]),
+            np.array([-0.2, 0.04, 0.0]),
+            np.array([25.0, 35.0, 30.0]),
+            np.array([2.0e-4, 4.0e-4, 3.0e-4]),
+        )
+
+        np.testing.assert_allclose(
+            got,
+            [-0.02638415943471567, -0.002819102194061375, 0.0],
+            rtol=0.0,
+            atol=1.0e-14,
+        )
+
+    def test_vectorized_zol_preserves_legacy_stable_and_unstable_solutions(self):
+        got = _zol_from_ri(
+            np.array([[-0.25, -0.05, 0.0], [0.02, 0.15, 0.75]]),
+            np.array([[20.0, 25.0, 30.0], [35.0, 40.0, 45.0]]),
+            np.array(
+                [[1.0e-4, 2.0e-4, 3.0e-4], [4.0e-4, 5.0e-4, 6.0e-4]]
+            ),
+        )
+
+        np.testing.assert_allclose(
+            got,
+            [
+                [-2.8564453125, -0.5810546875, 0.0],
+                [0.2490234375, 3.7060546875, 29.7607421875],
+            ],
+            rtol=0.0,
+            atol=0.0,
+        )
+
     def test_saturation_mixing_ratio_matches_wrf_expression(self):
         got = saturation_mixing_ratio(np.array([300.0]), np.array([100_000.0]))
         self.assertAlmostEqual(got[0], 0.02279024, places=7)
