@@ -76,11 +76,11 @@ class StaticGrid:
 
 CONFIG = Config(
     experiment_root=Path("/scratch/lililei1/kcfu/tc_mangkhut/cycle_test"),
-    nr_root=Path("/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout"),
+    nr_root=Path("/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/2domain"),
     output_dir=Path("./figs/initial_tc_lh_ohc"),
     valid_time="2018-09-10_00:00:00",
     member_domain="d02",
-    nr_domain="d03",
+    nr_domain="d02",
     filters=("EAKF", "QCF_RHF"),
     members=("006", "015", "029", "037", "043", "044"),
     experiments=(
