@@ -31,14 +31,14 @@ from scipy.spatial import Delaunay
 @dataclass(frozen=True)
 class Config:
     hx_dir: Path = Path(
-        "/share/home/lililei1/kcfu/tc_mangkhut/3create_obs/hx_rttov/4ens_BT"
+        "/share/home/lililei1/kcfu/tc_mangkhut/3create_obs/hx_rttov/4ens_BT_LACC"
     )
     mem_dir: Path = Path(
         "/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/0mem_all_time/10_00_00"
     )
     profile_path: Path = Path(
         "/share/home/lililei1/kcfu/tc_mangkhut/"
-        "3create_obs/hx_rttov/profile/profile_d01/prof09_12:00.dat"
+        "3create_obs/hx_rttov/profile/profile_d01_LACC_10_00_00/prof09_12:00.dat"
     )
     output_dir: Path = Path("./figs/LACC")
     current_time: str = "2018-09-10_00:00:00"

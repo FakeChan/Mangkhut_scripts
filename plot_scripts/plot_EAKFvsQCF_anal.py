@@ -96,8 +96,8 @@ if __name__ =='__main__':
     #                 '/scratch/lililei1/kcfu/tc_mangkhut/5cyclingDA/postAnal_QCF_RHF/d01_10_00_00/analysis_d01.ensmean']
     
     anal_file_list=['/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/0mem_all_time/cyclingDA/10_00_00/firstguess_d01.ensmean',
-                    '/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/2DART/run_dir/EAKF/postassim_mean_d01.nc',
-                    '/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/2DART/run_dir/QCF_RHF/postassim_mean_d01.nc']
+                    '/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/2DART/run_dir/EAKF/output_mean_d01.nc',
+                    '/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/2DART/run_dir/QCF_RHF/output_mean_d01.nc']
     
     title_list=['firstguess','EAKF','QCF_RHF']
     NR_path='/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/2domain/wrfout_d01_2018-09-10_00:00:00'
