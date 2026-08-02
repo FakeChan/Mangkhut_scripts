@@ -61,6 +61,15 @@ class Config:
     ocean_cp_j_kg_k: float = 3985.0
 
 
+@dataclass(frozen=True)
+class StaticGrid:
+    signature: tuple[object, ...]
+    lats: np.ndarray
+    lons: np.ndarray
+    ocean: np.ndarray
+    terrain_height_m: np.ndarray
+
+
 # =============================================================================
 # User configuration
 # =============================================================================
@@ -220,34 +229,70 @@ def _time0(data: xr.DataArray) -> xr.DataArray:
     return data
 
 
-def _mass_2d(ds: xr.Dataset, name: str) -> np.ndarray:
+def _mass_2d(
+    ds: xr.Dataset,
+    name: str,
+    y_slice: slice = slice(None),
+    x_slice: slice = slice(None),
+) -> np.ndarray:
     if name not in ds:
         raise KeyError(f"required WRF variable {name} is missing")
     data = _time0(ds[name])
     for dim in tuple(data.dims):
         if dim in {"bottom_top", "bottom_top_stag"}:
             data = data.isel({dim: 0})
-    values = np.asarray(data.squeeze().values, dtype=float)
+    spatial_indexers = {}
+    if "south_north" in data.dims:
+        spatial_indexers["south_north"] = y_slice
+    if "west_east" in data.dims:
+        spatial_indexers["west_east"] = x_slice
+    if spatial_indexers:
+        data = data.isel(spatial_indexers)
+    values = np.asarray(data.values, dtype=float)
     if values.ndim != 2:
         raise ValueError(f"{name} must be 2-D after slicing, got {values.shape}")
     return values
 
 
-def _lowest_staggered_wind(ds: xr.Dataset, name: str) -> np.ndarray:
+def _expanded_staggered_slice(selection: slice, mass_size: int) -> slice:
+    start, stop, step = selection.indices(mass_size)
+    if step != 1:
+        raise ValueError("spatial slices must use a unit step")
+    return slice(start, stop + 1, 1)
+
+
+def _lowest_staggered_wind(
+    ds: xr.Dataset,
+    name: str,
+    y_slice: slice = slice(None),
+    x_slice: slice = slice(None),
+) -> np.ndarray:
     if name not in ds:
         raise KeyError(f"required WRF variable {name} is missing")
     data = _time0(ds[name])
     if "bottom_top" in data.dims:
         data = data.isel(bottom_top=0)
-    values = np.asarray(data.values, dtype=float)
     if name == "U":
         if "west_east_stag" not in data.dims:
             raise ValueError("U does not have west_east_stag")
+        data = data.isel(
+            south_north=y_slice,
+            west_east_stag=_expanded_staggered_slice(
+                x_slice, int(ds.sizes["west_east"])
+            ),
+        )
         axis = data.dims.index("west_east_stag")
     else:
         if "south_north_stag" not in data.dims:
             raise ValueError("V does not have south_north_stag")
+        data = data.isel(
+            south_north_stag=_expanded_staggered_slice(
+                y_slice, int(ds.sizes["south_north"])
+            ),
+            west_east=x_slice,
+        )
         axis = data.dims.index("south_north_stag")
+    values = np.asarray(data.values, dtype=float)
     left = np.take(values, np.arange(values.shape[axis] - 1), axis=axis)
     right = np.take(values, np.arange(1, values.shape[axis]), axis=axis)
     output = 0.5 * (left + right)
@@ -256,16 +301,23 @@ def _lowest_staggered_wind(ds: xr.Dataset, name: str) -> np.ndarray:
     return output
 
 
-def _ocean_surface_temperature(ds: xr.Dataset, use_ocean_sst: bool) -> np.ndarray:
+def _ocean_surface_temperature(
+    ds: xr.Dataset,
+    use_ocean_sst: bool,
+    y_slice: slice = slice(None),
+    x_slice: slice = slice(None),
+) -> np.ndarray:
     if not use_ocean_sst:
-        return _mass_2d(ds, "TSK")
+        return _mass_2d(ds, "TSK", y_slice, x_slice)
     if "OM_TMP" not in ds:
         raise KeyError("OM_TMP is required for an ocean-running experiment")
     data = _time0(ds["OM_TMP"])
     ocean_dims = [dim for dim in data.dims if "ocean_layer" in dim]
     if len(ocean_dims) != 1:
         raise ValueError(f"could not identify one OM_TMP ocean dimension: {data.dims}")
-    values = np.asarray(data.isel({ocean_dims[0]: 0}).values, dtype=float)
+    data = data.isel({ocean_dims[0]: 0})
+    data = data.isel(south_north=y_slice, west_east=x_slice)
+    values = np.asarray(data.values, dtype=float)
     units = str(ds["OM_TMP"].attrs.get("units", "")).lower()
     if "c" in units and "k" not in units:
         values = values + 273.15
@@ -287,9 +339,70 @@ def _physics_attribute(ds: xr.Dataset, name: str, default: int | None = None) ->
     return int(value[0])
 
 
+_GRID_SIGNATURE_ATTRIBUTES = (
+    "DX",
+    "DY",
+    "MAP_PROJ",
+    "CEN_LAT",
+    "CEN_LON",
+    "MOAD_CEN_LAT",
+    "STAND_LON",
+    "TRUELAT1",
+    "TRUELAT2",
+    "I_PARENT_START",
+    "J_PARENT_START",
+    "PARENT_GRID_RATIO",
+)
+
+
+def _hashable_attribute(value: object) -> tuple[object, ...]:
+    array = np.asarray(value).ravel()
+    return tuple(item.item() if hasattr(item, "item") else item for item in array)
+
+
+def static_grid_signature(ds: xr.Dataset) -> tuple[object, ...]:
+    """Build a metadata-only key for a fixed WRF mass grid."""
+    if "south_north" not in ds.sizes or "west_east" not in ds.sizes:
+        raise KeyError("south_north and west_east dimensions are required")
+    if "XLAND" in ds:
+        mask_variable = "XLAND"
+    elif "LANDMASK" in ds:
+        mask_variable = "LANDMASK"
+    else:
+        raise KeyError("XLAND or LANDMASK is required to identify ocean points")
+    attributes = tuple(
+        (name, _hashable_attribute(ds.attrs[name]))
+        for name in _GRID_SIGNATURE_ATTRIBUTES
+        if name in ds.attrs
+    )
+    return (
+        int(ds.sizes["south_north"]),
+        int(ds.sizes["west_east"]),
+        mask_variable,
+        attributes,
+    )
+
+
+def read_static_grid(ds: xr.Dataset) -> StaticGrid:
+    """Read mass-grid fields that are invariant across ensemble members."""
+    signature = static_grid_signature(ds)
+    mask_variable = str(signature[2])
+    lats = _mass_2d(ds, "XLAT")
+    lons = _mass_2d(ds, "XLONG")
+    if mask_variable == "XLAND":
+        ocean = _mass_2d(ds, mask_variable) > 1.5
+    else:
+        ocean = _mass_2d(ds, mask_variable) < 0.5
+    terrain_height_m = _mass_2d(ds, "HGT")
+    return StaticGrid(signature, lats, lons, ocean, terrain_height_m)
+
+
 def read_surface_state(
     ds: xr.Dataset,
     use_ocean_sst: bool,
+    static_grid: StaticGrid | None = None,
+    y_slice: slice = slice(None),
+    x_slice: slice = slice(None),
 ) -> tuple[SurfaceState, np.ndarray, np.ndarray, np.ndarray]:
     """Reconstruct the lowest-level mass-grid state needed by SFCLAYREV."""
     sfclay = _physics_attribute(ds, "SF_SFCLAY_PHYSICS")
@@ -300,47 +413,60 @@ def read_surface_state(
     if _physics_attribute(ds, "ISFFLX") != 1:
         raise ValueError("ISFFLX must be 1 to diagnose surface moisture exchange")
 
-    u = _lowest_staggered_wind(ds, "U")
-    v = _lowest_staggered_wind(ds, "V")
-    perturbation_theta = _mass_2d(ds, "T")
-    pressure = _mass_2d(ds, "P") + _mass_2d(ds, "PB")
+    u = _lowest_staggered_wind(ds, "U", y_slice, x_slice)
+    v = _lowest_staggered_wind(ds, "V", y_slice, x_slice)
+    perturbation_theta = _mass_2d(ds, "T", y_slice, x_slice)
+    pressure = _mass_2d(ds, "P", y_slice, x_slice) + _mass_2d(
+        ds, "PB", y_slice, x_slice
+    )
     theta = perturbation_theta + 300.0
     air_temperature = theta * (pressure / P0_PA) ** R_OVER_CP
 
     if "PH" not in ds or "PHB" not in ds:
         raise KeyError("PH and PHB are required to reconstruct lowest-level height")
-    geopotential = np.asarray((_time0(ds["PH"]) + _time0(ds["PHB"])).values, dtype=float)
-    vertical_dim = _time0(ds["PH"]).dims.index("bottom_top_stag")
+    geopotential_indexers = {
+        "bottom_top_stag": slice(0, 2),
+        "south_north": y_slice,
+        "west_east": x_slice,
+    }
+    ph = _time0(ds["PH"]).isel(geopotential_indexers)
+    phb = _time0(ds["PHB"]).isel(geopotential_indexers)
+    geopotential = np.asarray((ph + phb).values, dtype=float)
+    vertical_dim = ph.dims.index("bottom_top_stag")
     lower = np.take(geopotential, 0, axis=vertical_dim)
     upper = np.take(geopotential, 1, axis=vertical_dim)
-    height = 0.5 * (lower + upper) / GRAVITY - _mass_2d(ds, "HGT")
-
-    lats = _mass_2d(ds, "XLAT")
-    lons = _mass_2d(ds, "XLONG")
-    if "XLAND" in ds:
-        ocean = _mass_2d(ds, "XLAND") > 1.5
-    elif "LANDMASK" in ds:
-        ocean = _mass_2d(ds, "LANDMASK") < 0.5
-    else:
-        raise KeyError("XLAND or LANDMASK is required to identify ocean points")
+    if static_grid is None:
+        static_grid = read_static_grid(ds)
+    elif static_grid.signature != static_grid_signature(ds):
+        raise ValueError("cached static grid does not match the WRF dataset")
+    lats = static_grid.lats[y_slice, x_slice]
+    lons = static_grid.lons[y_slice, x_slice]
+    ocean = static_grid.ocean[y_slice, x_slice]
+    terrain_height_m = static_grid.terrain_height_m[y_slice, x_slice]
+    height = 0.5 * (lower + upper) / GRAVITY - terrain_height_m
 
     shape = lats.shape
-    surface_temperature = _ocean_surface_temperature(ds, use_ocean_sst)
+    surface_temperature = _ocean_surface_temperature(
+        ds, use_ocean_sst, y_slice, x_slice
+    )
     if use_ocean_sst:
         # PWP ocean variables can be zero/uninitialized over land.  Land values
         # are never diagnosed, but must remain thermodynamically valid while the
         # vectorized surface-layer kernel evaluates the mass grid.
-        surface_temperature = np.where(ocean, surface_temperature, _mass_2d(ds, "TSK"))
+        surface_temperature = np.where(
+            ocean,
+            surface_temperature,
+            _mass_2d(ds, "TSK", y_slice, x_slice),
+        )
     named = {
         "U": u,
         "V": v,
         "T": air_temperature,
-        "QVAPOR": _mass_2d(ds, "QVAPOR"),
+        "QVAPOR": _mass_2d(ds, "QVAPOR", y_slice, x_slice),
         "pressure": pressure,
         "height": height,
-        "PSFC": _mass_2d(ds, "PSFC"),
+        "PSFC": _mass_2d(ds, "PSFC", y_slice, x_slice),
         "surface temperature": surface_temperature,
-        "PBLH": _mass_2d(ds, "PBLH"),
         "ocean mask": ocean,
     }
     bad_shapes = {name: value.shape for name, value in named.items() if value.shape != shape}
@@ -356,7 +482,6 @@ def read_surface_state(
         height_agl_m=height,
         u_ms=u,
         v_ms=v,
-        pbl_height_m=named["PBLH"],
         dx_m=float(ds.attrs.get("DX", np.nan)),
     )
     return state, lats, lons, ocean
@@ -368,23 +493,77 @@ def calculate_lh_field(ds: xr.Dataset, use_ocean_sst: bool) -> SurfaceFluxResult
     return revised_mm5_ocean_flux(state, SfclayOptions(isftcflx=isftcflx))
 
 
-def read_ohc_inputs(ds: xr.Dataset) -> tuple[np.ndarray, np.ndarray]:
-    """Read ocean temperature in C and depth in metres positive downward."""
+def read_ohc_inputs(
+    ds: xr.Dataset,
+    y_slice: slice = slice(None),
+    x_slice: slice = slice(None),
+    surface_temperature_k: np.ndarray | None = None,
+    depth_reference_index: tuple[int, int] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Read selected ocean temperature and positive-downward PWP depth."""
     if "OM_TMP" not in ds or "OM_DEPTH" not in ds:
         raise KeyError("OM_TMP and OM_DEPTH are required for OHC26")
     temperature_da = _time0(ds["OM_TMP"])
     depth_da = _time0(ds["OM_DEPTH"])
     ocean_dims = [dim for dim in temperature_da.dims if "ocean_layer" in dim]
     if len(ocean_dims) != 1:
-        raise ValueError(f"could not identify one OM_TMP ocean dimension: {temperature_da.dims}")
+        raise ValueError(
+            f"could not identify one OM_TMP ocean dimension: {temperature_da.dims}"
+        )
     ocean_dim = ocean_dims[0]
+    horizontal_dims = [dim for dim in temperature_da.dims if dim != ocean_dim]
+    if len(horizontal_dims) != 2:
+        raise ValueError(
+            "OM_TMP must have two horizontal dimensions after time slicing: "
+            f"{temperature_da.dims}"
+        )
+    spatial_indexers = {
+        horizontal_dims[0]: y_slice,
+        horizontal_dims[1]: x_slice,
+    }
+    temperature_da = temperature_da.isel(spatial_indexers)
+    selected_surface = None
+    if surface_temperature_k is not None:
+        selected_surface = np.asarray(surface_temperature_k, dtype=float)
+        expected_shape = tuple(temperature_da.sizes[dim] for dim in horizontal_dims)
+        if selected_surface.shape != expected_shape:
+            raise ValueError(
+                "surface temperature shape does not match the selected OHC region: "
+                f"{selected_surface.shape} != {expected_shape}"
+            )
+        temperature_da = temperature_da.isel({ocean_dim: slice(1, None)})
+    depth_spatial_indexers = {
+        dim: indexer
+        for dim, indexer in spatial_indexers.items()
+        if dim in depth_da.dims and depth_da.sizes[dim] > 1
+    }
+    depth_da = depth_da.isel(depth_spatial_indexers)
+    if depth_reference_index is not None:
+        # PWP OM_DEPTH is one horizontally shared vertical coordinate.  Select
+        # an ocean point so uninitialized land values are never used.
+        reference_y, reference_x = depth_reference_index
+        selected_shape = tuple(temperature_da.sizes[dim] for dim in horizontal_dims)
+        if not (
+            0 <= reference_y < selected_shape[0]
+            and 0 <= reference_x < selected_shape[1]
+        ):
+            raise ValueError(
+                "depth reference index lies outside the selected OHC region"
+            )
+        reference_indexers = {}
+        for dim, index in zip(horizontal_dims, depth_reference_index):
+            if dim in depth_da.dims:
+                reference_indexers[dim] = 0 if depth_da.sizes[dim] == 1 else index
+        depth_da = depth_da.isel(reference_indexers)
     temperature_da = temperature_da.transpose(
         ocean_dim, *[dim for dim in temperature_da.dims if dim != ocean_dim]
     )
     if ocean_dim not in depth_da.dims:
         depth_ocean_dims = [dim for dim in depth_da.dims if "ocean_layer" in dim]
         if len(depth_ocean_dims) != 1:
-            raise ValueError(f"could not identify OM_DEPTH ocean dimension: {depth_da.dims}")
+            raise ValueError(
+                f"could not identify OM_DEPTH ocean dimension: {depth_da.dims}"
+            )
         depth_da = depth_da.rename({depth_ocean_dims[0]: ocean_dim})
     depth_da = depth_da.transpose(
         ocean_dim, *[dim for dim in depth_da.dims if dim != ocean_dim]
@@ -393,10 +572,16 @@ def read_ohc_inputs(ds: xr.Dataset) -> tuple[np.ndarray, np.ndarray]:
     temperature = np.asarray(temperature_da.values, dtype=float)
     depth = np.asarray(depth_da.values, dtype=float)
     temp_units = str(ds["OM_TMP"].attrs.get("units", "")).lower()
-    if "k" in temp_units or ("c" not in temp_units and np.nanmedian(temperature) > 100.0):
+    if "k" in temp_units or (
+        "c" not in temp_units and np.nanmedian(temperature) > 100.0
+    ):
         temperature = temperature - 273.15
     elif "c" not in temp_units:
         raise ValueError(f"unknown OM_TMP units: {temp_units!r}")
+    if selected_surface is not None:
+        temperature = np.concatenate(
+            ((selected_surface - 273.15)[None, ...], temperature), axis=0
+        )
 
     depth_units = str(ds["OM_DEPTH"].attrs.get("units", "")).lower().strip()
     if depth_units not in {"m", "meter", "meters", "metre", "metres"}:
@@ -426,6 +611,18 @@ def read_ohc_inputs(ds: xr.Dataset) -> tuple[np.ndarray, np.ndarray]:
     if orientation < 0:
         depth = -depth
     return temperature, depth
+
+
+def mask_bounding_slices(mask: np.ndarray) -> tuple[slice, slice]:
+    """Return the smallest rectangular slices containing a nonempty 2-D mask."""
+    selected = np.asarray(mask, dtype=bool)
+    if selected.ndim != 2 or not np.any(selected):
+        raise ValueError("mask must be a nonempty 2-D array")
+    rows, columns = np.where(selected)
+    return (
+        slice(int(rows.min()), int(rows.max()) + 1),
+        slice(int(columns.min()), int(columns.max()) + 1),
+    )
 
 
 def find_unique_wrfout(root: Path, domain: str, valid_time: str) -> Path:
@@ -502,6 +699,8 @@ def calculate_member_records(
     center_lat, center_lon, center_slp = read_tc_center(nr_path, slp_reader)
     lh_records: list[dict[str, object]] = []
     ohc_records: list[dict[str, object]] = []
+    static_grid_cache: dict[tuple[object, ...], StaticGrid] = {}
+    mask_cache: dict[tuple[object, ...], np.ndarray] = {}
 
     for experiment in config.experiments:
         for filter_name in config.filters:
@@ -514,22 +713,34 @@ def calculate_member_records(
                 )
                 print(f"Reading {experiment.name}/{filter_name}/{member}: {member_path}")
                 with xr.open_dataset(member_path, decode_times=False) as ds:
-                    state, lats, lons, ocean = read_surface_state(
-                        ds, experiment.ocean_enabled
-                    )
-                    mask = tc_ocean_mask(
-                        lats,
-                        lons,
-                        center_lat,
-                        center_lon,
-                        config.radius_km,
-                        ocean,
+                    grid_signature = static_grid_signature(ds)
+                    if grid_signature not in static_grid_cache:
+                        static_grid_cache[grid_signature] = read_static_grid(ds)
+                    static_grid = static_grid_cache[grid_signature]
+                    if grid_signature not in mask_cache:
+                        mask_cache[grid_signature] = tc_ocean_mask(
+                            static_grid.lats,
+                            static_grid.lons,
+                            center_lat,
+                            center_lon,
+                            config.radius_km,
+                            static_grid.ocean,
+                        )
+                    mask = mask_cache[grid_signature]
+                    y_slice, x_slice = mask_bounding_slices(mask)
+                    local_mask = mask[y_slice, x_slice]
+                    state, _, _, _ = read_surface_state(
+                        ds,
+                        experiment.ocean_enabled,
+                        static_grid=static_grid,
+                        y_slice=y_slice,
+                        x_slice=x_slice,
                     )
                     isftcflx = _physics_attribute(ds, "ISFTCFLX")
                     flux = revised_mm5_ocean_flux(
                         state, SfclayOptions(isftcflx=isftcflx)
                     )
-                    lh_values = flux.lh[mask]
+                    lh_values = flux.lh[local_mask]
                     if not np.isfinite(lh_values).all():
                         raise ValueError(f"nonfinite LH in selected region: {member_path}")
                     common = {
@@ -554,11 +765,22 @@ def calculate_member_records(
                         }
                     )
                     if experiment.ocean_enabled:
-                        temperature_c, depth_m = read_ohc_inputs(ds)
+                        selected_rows, selected_columns = np.where(local_mask)
+                        depth_reference_index = (
+                            int(selected_rows[0]),
+                            int(selected_columns[0]),
+                        )
+                        temperature_c, depth_m = read_ohc_inputs(
+                            ds,
+                            y_slice=y_slice,
+                            x_slice=x_slice,
+                            surface_temperature_k=state.surface_temperature_k,
+                            depth_reference_index=depth_reference_index,
+                        )
                         ohc_j_m2, finite_points = _ohc_on_mask(
                             temperature_c,
                             depth_m,
-                            mask,
+                            local_mask,
                             config.ocean_density_kg_m3,
                             config.ocean_cp_j_kg_k,
                         )

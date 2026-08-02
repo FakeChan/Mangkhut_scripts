@@ -8,8 +8,46 @@ from tempfile import TemporaryDirectory
 import numpy as np
 import pandas as pd
 import xarray as xr
+from xarray.backends import BackendArray
+from xarray.core import indexing
 
 from plot_scripts import plot_initial_tc_lh_ohc as diag
+
+
+class RecordingBackendArray(BackendArray):
+    """Lazy in-memory array that records the slices requested by xarray."""
+
+    def __init__(self, values: np.ndarray):
+        self.values = np.asarray(values)
+        self.requested_keys: list[tuple[object, ...]] = []
+
+    @property
+    def shape(self):
+        return self.values.shape
+
+    @property
+    def dtype(self):
+        return self.values.dtype
+
+    def __getitem__(self, key):
+        return indexing.explicit_indexing_adapter(
+            key,
+            self.shape,
+            indexing.IndexingSupport.BASIC,
+            self._raw_indexing_method,
+        )
+
+    def _raw_indexing_method(self, key):
+        self.requested_keys.append(key)
+        return self.values[key]
+
+
+def lazy_recording_data_array(
+    values: np.ndarray, dims: tuple[str, ...]
+) -> tuple[xr.DataArray, RecordingBackendArray]:
+    backend = RecordingBackendArray(values)
+    data = xr.DataArray(indexing.LazilyIndexedArray(backend), dims=dims)
+    return data, backend
 
 
 class TcMaskTests(unittest.TestCase):
@@ -189,6 +227,32 @@ def synthetic_member_dataset(include_ocean: bool = True) -> xr.Dataset:
 
 
 class WrfReaderAndWorkflowTests(unittest.TestCase):
+    def test_surface_reader_only_loads_two_lowest_geopotential_levels(self):
+        ds = synthetic_member_dataset(include_ocean=False)
+        dims = ds["PH"].dims
+        ph_values = np.concatenate(
+            [
+                ds["PH"].values,
+                np.full((1, 3, 2, 3), 9.81 * 9999.0),
+            ],
+            axis=1,
+        )
+        phb_values = np.zeros_like(ph_values)
+        ph, ph_backend = lazy_recording_data_array(ph_values, dims)
+        phb, phb_backend = lazy_recording_data_array(phb_values, dims)
+        ds = ds.drop_vars(["PH", "PHB", "bottom_top_stag"]).assign(
+            PH=ph, PHB=phb
+        )
+
+        state, _, _, _ = diag.read_surface_state(ds, use_ocean_sst=False)
+
+        np.testing.assert_allclose(state.height_agl_m, 25.0)
+        expected = (0, slice(0, 2, 1), slice(None), slice(None))
+        self.assertTrue(ph_backend.requested_keys)
+        self.assertTrue(phb_backend.requested_keys)
+        self.assertTrue(all(key == expected for key in ph_backend.requested_keys))
+        self.assertTrue(all(key == expected for key in phb_backend.requested_keys))
+
     def test_reader_destaggers_wind_and_ignores_zero_stored_flux(self):
         ds = synthetic_member_dataset(include_ocean=True)
         state, lats, lons, ocean = diag.read_surface_state(ds, use_ocean_sst=True)
@@ -200,12 +264,192 @@ class WrfReaderAndWorkflowTests(unittest.TestCase):
         result = diag.calculate_lh_field(ds, use_ocean_sst=True)
         self.assertTrue((result.lh > 0.0).all())
 
+    def test_surface_reader_does_not_require_unused_pblh(self):
+        ds = synthetic_member_dataset(include_ocean=False).drop_vars("PBLH")
+
+        state, _, _, _ = diag.read_surface_state(ds, use_ocean_sst=False)
+
+        self.assertFalse(hasattr(state, "pbl_height_m"))
+
+    def test_surface_reader_reuses_matching_static_grid_without_variable_io(self):
+        first = synthetic_member_dataset(include_ocean=False)
+        static_grid = diag.read_static_grid(first)
+        second = synthetic_member_dataset(include_ocean=False)
+        backends = {}
+        replacements = {}
+        for name in ("XLAT", "XLONG", "XLAND", "HGT"):
+            data, backend = lazy_recording_data_array(
+                second[name].values.copy(), second[name].dims
+            )
+            replacements[name] = data
+            backends[name] = backend
+        second = second.drop_vars(list(replacements)).assign(replacements)
+
+        state, lats, lons, ocean = diag.read_surface_state(
+            second, use_ocean_sst=False, static_grid=static_grid
+        )
+
+        np.testing.assert_allclose(state.height_agl_m, 25.0)
+        np.testing.assert_allclose(lats, static_grid.lats)
+        np.testing.assert_allclose(lons, static_grid.lons)
+        np.testing.assert_array_equal(ocean, static_grid.ocean)
+        self.assertTrue(
+            all(not backend.requested_keys for backend in backends.values())
+        )
+
+    def test_surface_reader_only_loads_requested_spatial_box(self):
+        ds = synthetic_member_dataset(include_ocean=False)
+        static_grid = diag.read_static_grid(ds)
+        backends = {}
+        replacements = {}
+        for name in (
+            "U",
+            "V",
+            "T",
+            "P",
+            "PB",
+            "QVAPOR",
+            "PH",
+            "PHB",
+            "PSFC",
+            "TSK",
+        ):
+            data, backend = lazy_recording_data_array(
+                ds[name].values.copy(), ds[name].dims
+            )
+            replacements[name] = data
+            backends[name] = backend
+        ds = ds.drop_vars(list(replacements)).assign(replacements)
+
+        state, lats, _, _ = diag.read_surface_state(
+            ds,
+            use_ocean_sst=False,
+            static_grid=static_grid,
+            y_slice=slice(0, 1),
+            x_slice=slice(1, 3),
+        )
+
+        self.assertEqual(state.air_temperature_k.shape, (1, 2))
+        self.assertEqual(lats.shape, (1, 2))
+        mass_request = (0, 0, slice(0, 1, 1), slice(1, 3, 1))
+        for name in ("T", "P", "PB", "QVAPOR"):
+            self.assertTrue(
+                all(key == mass_request for key in backends[name].requested_keys)
+            )
+        surface_request = (0, slice(0, 1, 1), slice(1, 3, 1))
+        for name in ("PSFC", "TSK"):
+            self.assertTrue(
+                all(key == surface_request for key in backends[name].requested_keys)
+            )
+        self.assertTrue(
+            all(
+                key == (0, 0, slice(0, 1, 1), slice(1, 4, 1))
+                for key in backends["U"].requested_keys
+            )
+        )
+        self.assertTrue(
+            all(
+                key == (0, 0, slice(0, 2, 1), slice(1, 3, 1))
+                for key in backends["V"].requested_keys
+            )
+        )
+        geopotential_request = (
+            0,
+            slice(0, 2, 1),
+            slice(0, 1, 1),
+            slice(1, 3, 1),
+        )
+        for name in ("PH", "PHB"):
+            self.assertTrue(
+                all(
+                    key == geopotential_request
+                    for key in backends[name].requested_keys
+                )
+            )
+
     def test_read_ohc_inputs_converts_kelvin_and_preserves_depth(self):
         temperature_c, depth_m = diag.read_ohc_inputs(
             synthetic_member_dataset(include_ocean=True)
         )
         np.testing.assert_allclose(temperature_c[:, 0, 0], [29.0, 27.0, 25.0])
         np.testing.assert_allclose(depth_m[:, 0, 0], [0.0, 10.0, 20.0])
+
+    def test_ohc_reader_only_loads_requested_spatial_box(self):
+        ds = synthetic_member_dataset(include_ocean=True)
+        temperature_values = ds["OM_TMP"].values.copy()
+        depth_values = ds["OM_DEPTH"].values.copy()
+        temperature, temperature_backend = lazy_recording_data_array(
+            temperature_values, ds["OM_TMP"].dims
+        )
+        temperature.attrs["units"] = "K"
+        depth, depth_backend = lazy_recording_data_array(
+            depth_values, ds["OM_DEPTH"].dims
+        )
+        depth.attrs["units"] = "m"
+        ds = ds.drop_vars(["OM_TMP", "OM_DEPTH"]).assign(
+            OM_TMP=temperature, OM_DEPTH=depth
+        )
+
+        temperature_c, depth_m = diag.read_ohc_inputs(
+            ds, y_slice=slice(0, 1), x_slice=slice(1, 3)
+        )
+
+        self.assertEqual(temperature_c.shape, (3, 1, 2))
+        self.assertEqual(depth_m.shape, (3, 1, 2))
+        expected = (0, slice(None), slice(0, 1, 1), slice(1, 3, 1))
+        self.assertTrue(temperature_backend.requested_keys)
+        self.assertTrue(depth_backend.requested_keys)
+        self.assertTrue(
+            all(key == expected for key in temperature_backend.requested_keys)
+        )
+        self.assertTrue(all(key == expected for key in depth_backend.requested_keys))
+
+    def test_ohc_reader_reuses_surface_temperature_loaded_for_lh(self):
+        ds = synthetic_member_dataset(include_ocean=True)
+        temperature, temperature_backend = lazy_recording_data_array(
+            ds["OM_TMP"].values.copy(), ds["OM_TMP"].dims
+        )
+        temperature.attrs["units"] = "K"
+        ds = ds.drop_vars("OM_TMP").assign(OM_TMP=temperature)
+
+        state, _, _, _ = diag.read_surface_state(ds, use_ocean_sst=True)
+        temperature_c, _ = diag.read_ohc_inputs(
+            ds,
+            y_slice=slice(0, 1),
+            x_slice=slice(1, 3),
+            surface_temperature_k=state.surface_temperature_k[0:1, 1:3],
+        )
+
+        np.testing.assert_allclose(temperature_c[:, 0, 0], [29.0, 27.0, 25.0])
+        surface_request = (0, 0, slice(None), slice(None))
+        subsurface_request = (0, slice(1, 3, 1), slice(0, 1, 1), slice(1, 3, 1))
+        self.assertIn(surface_request, temperature_backend.requested_keys)
+        self.assertIn(subsurface_request, temperature_backend.requested_keys)
+        self.assertNotIn(
+            (0, slice(None), slice(0, 1, 1), slice(1, 3, 1)),
+            temperature_backend.requested_keys,
+        )
+
+    def test_ohc_reader_loads_one_shared_depth_profile(self):
+        ds = synthetic_member_dataset(include_ocean=True)
+        depth, depth_backend = lazy_recording_data_array(
+            ds["OM_DEPTH"].values.copy(), ds["OM_DEPTH"].dims
+        )
+        depth.attrs["units"] = "m"
+        ds = ds.drop_vars("OM_DEPTH").assign(OM_DEPTH=depth)
+
+        _, depth_m = diag.read_ohc_inputs(
+            ds,
+            y_slice=slice(0, 1),
+            x_slice=slice(1, 3),
+            depth_reference_index=(0, 0),
+        )
+
+        self.assertEqual(depth_m.shape, (3, 1, 2))
+        np.testing.assert_allclose(depth_m[:, 0, 1], [0.0, 10.0, 20.0])
+        expected = (0, slice(None), 0, 1)
+        self.assertTrue(depth_backend.requested_keys)
+        self.assertTrue(all(key == expected for key in depth_backend.requested_keys))
 
     def test_invalid_land_ocean_state_is_ignored_before_lh_and_ohc(self):
         ds = synthetic_member_dataset(include_ocean=True)

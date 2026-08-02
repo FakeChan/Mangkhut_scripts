@@ -38,7 +38,6 @@ class SurfaceState:
     height_agl_m: np.ndarray
     u_ms: np.ndarray
     v_ms: np.ndarray
-    pbl_height_m: np.ndarray
     dx_m: float
 
 

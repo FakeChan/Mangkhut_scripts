@@ -34,7 +34,6 @@ def uniform_surface_state(
         height_agl_m=field(25.0),
         u_ms=field(u_ms),
         v_ms=field(v_ms),
-        pbl_height_m=field(800.0),
         dx_m=1_500.0,
     )
 
