@@ -19,6 +19,7 @@ def uniform_surface_state(
     air_temperature_k: float = 299.0,
     surface_temperature_k: float = 301.0,
     vapor_mixing_ratio: float = 0.018,
+    air_pressure_pa: float = 95_000.0,
     u_ms: float = 8.0,
     v_ms: float = 0.0,
 ) -> SurfaceState:
@@ -31,11 +32,13 @@ def uniform_surface_state(
         air_temperature_k=field(air_temperature_k),
         surface_temperature_k=field(surface_temperature_k),
         vapor_mixing_ratio=field(vapor_mixing_ratio),
-        air_pressure_pa=field(95_000.0),
+        air_pressure_pa=field(air_pressure_pa),
         surface_pressure_pa=field(100_000.0),
         height_agl_m=field(25.0),
         u_ms=field(u_ms),
         v_ms=field(v_ms),
+        initial_friction_velocity_ms=field(1.0e-4),
+        initial_momentum_roughness_m=field(1.0e-4),
         dx_m=1_500.0,
     )
 
@@ -119,27 +122,23 @@ class Wrf41SfclayrevTests(unittest.TestCase):
         self.assertEqual(result.qfx[0, 0], 0.0)
         self.assertEqual(result.lh[0, 0], 0.0)
 
-    def test_nonconvergence_reports_actual_count_and_worst_point(self):
-        def field(converging: float, nonconverging: float) -> np.ndarray:
-            return np.array([[converging, nonconverging]], dtype=float)
-
-        state = SurfaceState(
-            air_temperature_k=field(299.0, 260.0),
-            surface_temperature_k=field(301.0, 280.0),
-            vapor_mixing_ratio=field(0.018, 0.001),
-            air_pressure_pa=field(95_000.0, 95_000.0),
-            surface_pressure_pa=field(100_000.0, 100_000.0),
-            height_agl_m=field(25.0, 100.0),
-            u_ms=field(8.0, 10.0),
-            v_ms=field(0.0, 0.0),
-            dx_m=1_500.0,
+    def test_neutral_surface_applies_one_wrf_under_relaxed_ust_update(self):
+        state = uniform_surface_state(
+            air_temperature_k=300.0,
+            surface_temperature_k=300.0,
+            vapor_mixing_ratio=0.022790237763947962,
+            air_pressure_pa=100_000.0,
         )
 
-        with self.assertRaisesRegex(
-            RuntimeError,
-            r"1/2 grid points.*max_change=.*index=\(0, 1\).*Ri=",
-        ):
-            revised_mm5_ocean_flux(state, SfclayOptions(isftcflx=0))
+        result = revised_mm5_ocean_flux(state, SfclayOptions(isftcflx=0))
+
+        self.assertAlmostEqual(
+            result.friction_velocity_ms[0, 0], 0.1287789125674392, places=14
+        )
+        self.assertAlmostEqual(
+            result.momentum_roughness_m[0, 0], 4.408729015485623e-5, places=16
+        )
+        self.assertEqual(result.iterations, 1)
 
     def test_shape_mismatch_is_rejected(self):
         state = uniform_surface_state()

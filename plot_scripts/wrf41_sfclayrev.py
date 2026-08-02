@@ -38,14 +38,14 @@ class SurfaceState:
     height_agl_m: np.ndarray
     u_ms: np.ndarray
     v_ms: np.ndarray
+    initial_friction_velocity_ms: np.ndarray
+    initial_momentum_roughness_m: np.ndarray
     dx_m: float
 
 
 @dataclass(frozen=True)
 class SfclayOptions:
     isftcflx: int = 0
-    max_iterations: int = 100
-    tolerance: float = 1.0e-7
     latent_heat_j_kg: float = XLV_J_KG
 
 
@@ -257,15 +257,14 @@ def _validate_state(state: SurfaceState) -> tuple[int, int]:
 def _momentum_roughness(
     ustar: np.ndarray, isftcflx: int
 ) -> np.ndarray:
-    safe_ustar = np.maximum(ustar, 0.01)
     if isftcflx == 0:
-        z0 = CZO * safe_ustar**2 / GRAVITY + 0.11 * 1.5e-5 / safe_ustar
-    else:
-        weight = np.minimum((safe_ustar / 1.06) ** 0.3, 1.0)
-        z1 = 0.011 * safe_ustar**2 / GRAVITY + OZO
-        z2 = 10.0 * np.exp(-9.5 * safe_ustar ** (-1.0 / 3.0))
-        z2 += 0.11 * 1.5e-5 / safe_ustar
-        z0 = (1.0 - weight) * z1 + weight * z2
+        z0 = CZO * ustar**2 / GRAVITY + 0.11 * 1.5e-5 / ustar
+        return np.minimum(z0, 2.85e-3)
+    weight = np.minimum((ustar / 1.06) ** 0.3, 1.0)
+    z1 = 0.011 * ustar**2 / GRAVITY + OZO
+    z2 = 10.0 * np.exp(-9.5 * ustar ** (-1.0 / 3.0))
+    z2 += 0.11 * 1.5e-5 / np.maximum(ustar, 0.01)
+    z0 = (1.0 - weight) * z1 + weight * z2
     return np.clip(z0, 1.27e-7, 2.85e-3)
 
 
@@ -292,8 +291,6 @@ def revised_mm5_ocean_flux(
     _validate_state(state)
     if options.isftcflx not in {0, 1, 2}:
         raise ValueError("isftcflx must be 0, 1, or 2")
-    if options.max_iterations < 1 or options.tolerance <= 0.0:
-        raise ValueError("iteration controls must be positive")
 
     ta = np.asarray(state.air_temperature_k, dtype=float)
     ts = np.asarray(state.surface_temperature_k, dtype=float)
@@ -303,6 +300,10 @@ def revised_mm5_ocean_flux(
     z = np.asarray(state.height_agl_m, dtype=float)
     u = np.asarray(state.u_ms, dtype=float)
     v = np.asarray(state.v_ms, dtype=float)
+    initial_ustar = np.asarray(state.initial_friction_velocity_ms, dtype=float)
+    initial_z0m = np.asarray(state.initial_momentum_roughness_m, dtype=float)
+    if np.any(initial_ustar <= 0.0) or np.any(initial_z0m <= 0.0):
+        raise ValueError("initial friction velocity and roughness must be positive")
 
     qs = saturation_mixing_ratio(ts, ps)
     theta_a = ta * (P0_PA / pa) ** R_OVER_CP
@@ -320,47 +321,27 @@ def revised_mm5_ocean_flux(
     )
     bulk_ri = GRAVITY / theta_a * z * dtheta_v / effective_wind**2
 
-    ustar = np.maximum(KARMAN * effective_wind / np.log((z + 1.0e-4) / 1.0e-4), 0.001)
-    z0m = _momentum_roughness(ustar, options.isftcflx)
-    iterations = options.max_iterations
-    for iteration in range(1, options.max_iterations + 1):
-        zol = _zol_from_ri(bulk_ri, z, z0m)
-        psi_m = _integrated_psi(zol, z, z0m, "momentum")
-        denom_m = np.maximum(np.log((z + z0m) / z0m) - psi_m, 1.0e-6)
-        target = np.maximum(KARMAN * effective_wind / denom_m, 0.001)
-        new_ustar = 0.5 * ustar + 0.5 * target
-        new_z0m = _momentum_roughness(new_ustar, options.isftcflx)
-        ustar_change = np.abs(new_ustar - ustar)
-        z0m_change = np.abs(new_z0m - z0m)
-        point_change = np.maximum(ustar_change, z0m_change)
-        change = float(np.max(point_change))
-        ustar, z0m = new_ustar, new_z0m
-        if change <= options.tolerance:
-            iterations = iteration
-            break
-    else:
-        unconverged = point_change > options.tolerance
-        unconverged_count = int(np.count_nonzero(unconverged))
-        worst_index = tuple(
-            int(index)
-            for index in np.unravel_index(
-                int(np.argmax(point_change)), point_change.shape
-            )
-        )
-        raise RuntimeError(
-            "Revised-MM5 surface solve failed to converge at "
-            f"{unconverged_count}/{ustar.size} grid points after "
-            f"{options.max_iterations} iterations; "
-            f"max_change={point_change[worst_index]:.6e} at index={worst_index}; "
-            f"ustar_change={ustar_change[worst_index]:.6e}; "
-            f"z0m_change={z0m_change[worst_index]:.6e}; "
-            f"Ri={bulk_ri[worst_index]:.6e}"
-        )
+    log_m = np.log((z + initial_z0m) / initial_z0m)
+    low_ustar_unstable = (bulk_ri < 0.0) & (initial_ustar < 0.001)
+    ri_for_solver = np.where(low_ustar_unstable, 0.0, bulk_ri)
+    zol = _zol_from_ri(ri_for_solver, z, initial_z0m)
+    zol = np.where(low_ustar_unstable, bulk_ri * log_m, zol)
+    psi_m = _integrated_psi(zol, z, initial_z0m, "momentum")
+    denom_m = log_m - psi_m
+    if np.any(denom_m <= 0.0):
+        raise ValueError("nonpositive Revised-MM5 momentum transfer denominator")
 
-    zol = _zol_from_ri(bulk_ri, z, z0m)
-    z0q = _moisture_roughness(ustar, z0m, ta, options.isftcflx)
+    z0q = _moisture_roughness(
+        initial_ustar, initial_z0m, ta, options.isftcflx
+    )
     psi_q = _integrated_psi(zol, z, z0q, "heat")
-    denom_q = np.maximum(np.log((z + z0q) / z0q) - psi_q, 1.0e-6)
+    denom_q = np.log((z + z0q) / z0q) - psi_q
+    if np.any(denom_q <= 0.0):
+        raise ValueError("nonpositive Revised-MM5 moisture transfer denominator")
+
+    target_ustar = KARMAN * effective_wind / denom_m
+    ustar = 0.5 * initial_ustar + 0.5 * target_ustar
+    z0m = _momentum_roughness(ustar, options.isftcflx)
     virtual_temperature = ta * (1.0 + EP1 * qa)
     density = ps / (RD * virtual_temperature)
     flqc = density * ustar * KARMAN / denom_q
@@ -375,5 +356,5 @@ def revised_mm5_ocean_flux(
         moisture_roughness_m=z0q,
         bulk_richardson=bulk_ri,
         inverse_obukhov_length=zol / z,
-        iterations=iterations,
+        iterations=1,
     )

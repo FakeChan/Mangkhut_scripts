@@ -35,6 +35,7 @@ except ModuleNotFoundError:  # Direct execution from plot_scripts/.
 EARTH_RADIUS_KM = 6371.0
 GRAVITY = 9.81
 P0_PA = 100_000.0
+WRF_INITIAL_OCEAN_Z0_M = 1.0e-4
 
 
 @dataclass(frozen=True)
@@ -254,6 +255,23 @@ def _mass_2d(
     return values
 
 
+def _incoming_ocean_roughness(
+    ds: xr.Dataset,
+    shape: tuple[int, int],
+    y_slice: slice,
+    x_slice: slice,
+) -> np.ndarray:
+    """Read ZNT or reconstruct WRF's documented non-restart ocean initial value."""
+    if "ZNT" in ds:
+        return _mass_2d(ds, "ZNT", y_slice, x_slice)
+    if "XTIME" not in ds:
+        raise KeyError("ZNT is missing and XTIME=0 cannot be verified")
+    xtime = np.asarray(_time0(ds["XTIME"]).values, dtype=float)
+    if xtime.size != 1 or not np.isclose(float(xtime.reshape(-1)[0]), 0.0):
+        raise KeyError("ZNT is required unless the input is at XTIME=0")
+    return np.full(shape, WRF_INITIAL_OCEAN_Z0_M, dtype=float)
+
+
 def _expanded_staggered_slice(selection: slice, mass_size: int) -> slice:
     start, stop, step = selection.indices(mass_size)
     if step != 1:
@@ -446,6 +464,9 @@ def read_surface_state(
     height = 0.5 * (lower + upper) / GRAVITY - terrain_height_m
 
     shape = lats.shape
+    incoming_roughness = _incoming_ocean_roughness(
+        ds, shape, y_slice, x_slice
+    )
     surface_temperature = _ocean_surface_temperature(
         ds, use_ocean_sst, y_slice, x_slice
     )
@@ -468,6 +489,8 @@ def read_surface_state(
         "PSFC": _mass_2d(ds, "PSFC", y_slice, x_slice),
         "surface temperature": surface_temperature,
         "ocean mask": ocean,
+        "UST": _mass_2d(ds, "UST", y_slice, x_slice),
+        "ZNT": incoming_roughness,
     }
     bad_shapes = {name: value.shape for name, value in named.items() if value.shape != shape}
     if bad_shapes:
@@ -482,6 +505,8 @@ def read_surface_state(
         height_agl_m=height,
         u_ms=u,
         v_ms=v,
+        initial_friction_velocity_ms=named["UST"],
+        initial_momentum_roughness_m=named["ZNT"],
         dx_m=float(ds.attrs.get("DX", np.nan)),
     )
     return state, lats, lons, ocean

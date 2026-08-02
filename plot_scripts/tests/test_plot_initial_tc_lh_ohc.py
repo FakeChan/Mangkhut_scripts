@@ -195,6 +195,11 @@ def synthetic_member_dataset(include_ocean: bool = True) -> xr.Dataset:
             ),
             "QFX": (("Time", "south_north", "west_east"), np.zeros((1, ny, nx))),
             "LH": (("Time", "south_north", "west_east"), np.zeros((1, ny, nx))),
+            "UST": (
+                ("Time", "south_north", "west_east"),
+                np.full((1, ny, nx), 1.0e-4),
+            ),
+            "XTIME": (("Time",), np.array([0.0])),
         },
         coords=coords,
         attrs={
@@ -227,7 +232,7 @@ def synthetic_member_dataset(include_ocean: bool = True) -> xr.Dataset:
 
 
 class WrfReaderAndWorkflowTests(unittest.TestCase):
-    def test_surface_solver_excludes_unselected_nonconverging_land_point(self):
+    def test_surface_solver_excludes_unselected_invalid_land_point(self):
         def field(ocean_value: float, land_value: float) -> np.ndarray:
             return np.array([[ocean_value, land_value]], dtype=float)
 
@@ -240,6 +245,8 @@ class WrfReaderAndWorkflowTests(unittest.TestCase):
             height_agl_m=field(25.0, 100.0),
             u_ms=field(8.0, 10.0),
             v_ms=field(0.0, 0.0),
+            initial_friction_velocity_ms=field(1.0e-4, 1.0e-4),
+            initial_momentum_roughness_m=field(1.0e-4, 1.0e-4),
             dx_m=1_500.0,
         )
 
@@ -284,10 +291,19 @@ class WrfReaderAndWorkflowTests(unittest.TestCase):
         np.testing.assert_allclose(state.u_ms, 8.0)
         np.testing.assert_allclose(state.v_ms, 0.0)
         np.testing.assert_allclose(state.height_agl_m, 25.0)
+        np.testing.assert_allclose(state.initial_friction_velocity_ms, 1.0e-4)
+        np.testing.assert_allclose(state.initial_momentum_roughness_m, 1.0e-4)
         self.assertEqual(lats.shape, (2, 3))
         self.assertTrue(ocean.all())
         result = diag.calculate_lh_field(ds, use_ocean_sst=True)
         self.assertTrue((result.lh > 0.0).all())
+
+    def test_surface_reader_rejects_missing_znt_after_initial_time(self):
+        ds = synthetic_member_dataset(include_ocean=False)
+        ds["XTIME"][:] = 5.0
+
+        with self.assertRaisesRegex(KeyError, "ZNT.*XTIME=0"):
+            diag.read_surface_state(ds, use_ocean_sst=False)
 
     def test_surface_reader_does_not_require_unused_pblh(self):
         ds = synthetic_member_dataset(include_ocean=False).drop_vars("PBLH")
@@ -338,6 +354,7 @@ class WrfReaderAndWorkflowTests(unittest.TestCase):
             "PHB",
             "PSFC",
             "TSK",
+            "UST",
         ):
             data, backend = lazy_recording_data_array(
                 ds[name].values.copy(), ds[name].dims
@@ -362,7 +379,7 @@ class WrfReaderAndWorkflowTests(unittest.TestCase):
                 all(key == mass_request for key in backends[name].requested_keys)
             )
         surface_request = (0, slice(0, 1, 1), slice(1, 3, 1))
-        for name in ("PSFC", "TSK"):
+        for name in ("PSFC", "TSK", "UST"):
             self.assertTrue(
                 all(key == surface_request for key in backends[name].requested_keys)
             )
