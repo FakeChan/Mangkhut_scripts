@@ -177,7 +177,9 @@ def ohc26_profile(
         )
     warm_depth = np.concatenate((warm_depth, [d26]))
     warm_temperature = np.concatenate((warm_temperature, [0.0]))
-    integral_k_m = float(np.trapezoid(warm_temperature, warm_depth))
+    layer_thickness = np.diff(warm_depth)
+    layer_mean_anomaly = 0.5 * (warm_temperature[:-1] + warm_temperature[1:])
+    integral_k_m = float(np.sum(layer_mean_anomaly * layer_thickness))
     return rho * cp * integral_k_m
 
 
@@ -295,7 +297,7 @@ def read_surface_state(
         raise ValueError(
             f"unsupported SF_SFCLAY_PHYSICS={sfclay}; only WRF 4.1 Revised MM5 (1) is implemented"
         )
-    if _physics_attribute(ds, "ISFFLX", 1) != 1:
+    if _physics_attribute(ds, "ISFFLX") != 1:
         raise ValueError("ISFFLX must be 1 to diagnose surface moisture exchange")
 
     u = _lowest_staggered_wind(ds, "U")
@@ -323,6 +325,12 @@ def read_surface_state(
         raise KeyError("XLAND or LANDMASK is required to identify ocean points")
 
     shape = lats.shape
+    surface_temperature = _ocean_surface_temperature(ds, use_ocean_sst)
+    if use_ocean_sst:
+        # PWP ocean variables can be zero/uninitialized over land.  Land values
+        # are never diagnosed, but must remain thermodynamically valid while the
+        # vectorized surface-layer kernel evaluates the mass grid.
+        surface_temperature = np.where(ocean, surface_temperature, _mass_2d(ds, "TSK"))
     named = {
         "U": u,
         "V": v,
@@ -331,7 +339,7 @@ def read_surface_state(
         "pressure": pressure,
         "height": height,
         "PSFC": _mass_2d(ds, "PSFC"),
-        "surface temperature": _ocean_surface_temperature(ds, use_ocean_sst),
+        "surface temperature": surface_temperature,
         "PBLH": _mass_2d(ds, "PBLH"),
         "ocean mask": ocean,
     }
@@ -356,7 +364,7 @@ def read_surface_state(
 
 def calculate_lh_field(ds: xr.Dataset, use_ocean_sst: bool) -> SurfaceFluxResult:
     state, _, _, _ = read_surface_state(ds, use_ocean_sst)
-    isftcflx = _physics_attribute(ds, "ISFTCFLX", 0)
+    isftcflx = _physics_attribute(ds, "ISFTCFLX")
     return revised_mm5_ocean_flux(state, SfclayOptions(isftcflx=isftcflx))
 
 
@@ -402,11 +410,21 @@ def read_ohc_inputs(ds: xr.Dataset) -> tuple[np.ndarray, np.ndarray]:
             raise ValueError(
                 f"OM_DEPTH shape {depth.shape} cannot broadcast to OM_TMP {temperature.shape}"
             ) from exc
-    mean_profile = np.nanmean(depth.reshape(depth.shape[0], -1), axis=1)
-    if np.all(np.diff(mean_profile) < 0.0):
+    orientation = None
+    for profile in depth.reshape(depth.shape[0], -1).T:
+        if not np.isfinite(profile).all():
+            continue
+        differences = np.diff(profile)
+        if np.all(differences > 0.0):
+            orientation = 1
+            break
+        if np.all(differences < 0.0):
+            orientation = -1
+            break
+    if orientation is None:
+        raise ValueError("OM_DEPTH has no finite strictly monotonic ocean profile")
+    if orientation < 0:
         depth = -depth
-    if np.any(np.diff(depth, axis=0) <= 0.0):
-        raise ValueError("OM_DEPTH must be strictly monotonic positive downward")
     return temperature, depth
 
 
@@ -415,8 +433,7 @@ def find_unique_wrfout(root: Path, domain: str, valid_time: str) -> Path:
     if not root.exists():
         raise FileNotFoundError(f"input directory does not exist: {root}")
     basename = f"wrfout_{domain}_{valid_time}"
-    exact = sorted(path for path in root.rglob(basename) if path.is_file())
-    matches = exact or sorted(path for path in root.rglob(f"{basename}*") if path.is_file())
+    matches = sorted(path for path in root.rglob(f"{basename}*") if path.is_file())
     if not matches:
         raise FileNotFoundError(f"no {basename}* below {root}")
     if len(matches) != 1:
@@ -467,7 +484,7 @@ def _ohc_on_mask(
     cp: float,
 ) -> tuple[float, int]:
     values = []
-    for j, i in zip(*np.where(mask), strict=True):
+    for j, i in zip(*np.where(mask)):
         values.append(
             ohc26_profile(temperature_c[:, j, i], depth_m[:, j, i], rho, cp)
         )
@@ -508,7 +525,7 @@ def calculate_member_records(
                         config.radius_km,
                         ocean,
                     )
-                    isftcflx = _physics_attribute(ds, "ISFTCFLX", 0)
+                    isftcflx = _physics_attribute(ds, "ISFTCFLX")
                     flux = revised_mm5_ocean_flux(
                         state, SfclayOptions(isftcflx=isftcflx)
                     )

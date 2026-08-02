@@ -207,6 +207,40 @@ class WrfReaderAndWorkflowTests(unittest.TestCase):
         np.testing.assert_allclose(temperature_c[:, 0, 0], [29.0, 27.0, 25.0])
         np.testing.assert_allclose(depth_m[:, 0, 0], [0.0, 10.0, 20.0])
 
+    def test_invalid_land_ocean_state_is_ignored_before_lh_and_ohc(self):
+        ds = synthetic_member_dataset(include_ocean=True)
+        ds["XLAND"][0, 0, 0] = 1.0
+        ds["OM_TMP"][0, :, 0, 0] = 0.0
+        depth = ds["OM_DEPTH"].values.copy()
+        depth[0, :, 0, 0] = 0.0
+        ds["OM_DEPTH"] = (ds["OM_DEPTH"].dims, depth, {"units": "m"})
+        flux = diag.calculate_lh_field(ds, use_ocean_sst=True)
+        self.assertTrue(np.isfinite(flux.lh).all())
+        temperature_c, depth_m = diag.read_ohc_inputs(ds)
+        mask = np.asarray(ds["XLAND"][0].values > 1.5)
+        mean, count = diag._ohc_on_mask(
+            temperature_c, depth_m, mask, 1025.0, 3985.0
+        )
+        self.assertTrue(np.isfinite(mean))
+        self.assertEqual(count, int(mask.sum()))
+
+    def test_missing_surface_physics_metadata_is_rejected(self):
+        for attribute in ("ISFFLX", "ISFTCFLX"):
+            with self.subTest(attribute=attribute):
+                ds = synthetic_member_dataset(include_ocean=True)
+                del ds.attrs[attribute]
+                with self.assertRaisesRegex(KeyError, attribute):
+                    diag.calculate_lh_field(ds, use_ocean_sst=True)
+
+    def test_exact_and_suffixed_wrfout_matches_are_ambiguous(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            basename = "wrfout_d02_2018-09-10_00:00:00"
+            (root / basename).touch()
+            (root / f"{basename}.backup").touch()
+            with self.assertRaisesRegex(ValueError, "ambiguous"):
+                diag.find_unique_wrfout(root, "d02", "2018-09-10_00:00:00")
+
     def test_group_statistics_use_sample_standard_deviation(self):
         frame = pd.DataFrame(
             {
