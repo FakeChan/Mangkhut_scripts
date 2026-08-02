@@ -261,5 +261,55 @@ class WrfReaderAndWorkflowTests(unittest.TestCase):
         self.assertTrue((lh["stored_flux_used"] == False).all())  # noqa: E712
 
 
+class OutputTests(unittest.TestCase):
+    def test_write_outputs_creates_two_csvs_and_two_separate_pngs(self):
+        with TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            config = replace(
+                diag.CONFIG,
+                output_dir=output_dir,
+                filters=("EAKF", "QCF_RHF"),
+                members=("001", "002"),
+                experiments=(
+                    diag.Experiment("noda", "No DA", False, "#0072B2"),
+                    diag.Experiment("weak", "Weak", True, "#D55E00"),
+                ),
+            )
+            lh = pd.DataFrame(
+                {
+                    "experiment": ["noda", "noda", "weak", "weak"],
+                    "experiment_label": ["No DA", "No DA", "Weak", "Weak"],
+                    "filter": ["EAKF", "QCF_RHF", "EAKF", "QCF_RHF"],
+                    "member": ["001", "002", "001", "002"],
+                    "lh_mean_w_m2": [120.0, 125.0, 130.0, 135.0],
+                    "ensemble_mean": [120.0, 125.0, 130.0, 135.0],
+                    "ensemble_std": [0.0, 0.0, 0.0, 0.0],
+                }
+            )
+            ohc = pd.DataFrame(
+                {
+                    "experiment": ["weak", "weak"],
+                    "experiment_label": ["Weak", "Weak"],
+                    "filter": ["EAKF", "QCF_RHF"],
+                    "member": ["001", "002"],
+                    "ohc26_mean_kj_cm2": [80.0, 82.0],
+                    "ensemble_mean": [80.0, 82.0],
+                    "ensemble_std": [0.0, 0.0],
+                }
+            )
+            paths = diag.write_outputs(lh, ohc, config)
+            self.assertEqual(
+                [path.name for path in paths],
+                [
+                    "initial_tc150_lh_members.csv",
+                    "initial_tc150_ohc_members.csv",
+                    "initial_tc150_lh.png",
+                    "initial_tc150_ohc.png",
+                ],
+            )
+            self.assertTrue(all(path.stat().st_size > 0 for path in paths))
+            self.assertEqual(len(list(output_dir.glob("*.png"))), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

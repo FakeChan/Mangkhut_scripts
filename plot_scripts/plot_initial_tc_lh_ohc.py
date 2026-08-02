@@ -567,3 +567,153 @@ def calculate_member_records(
             f"record-count mismatch: LH={len(lh)}/{expected_lh}, OHC={len(ohc)}/{expected_ohc}"
         )
     return lh, ohc
+
+
+FILTER_MARKERS = {"EAKF": "o", "QCF_RHF": "s"}
+
+
+def plot_member_comparison(
+    frame: pd.DataFrame,
+    value_column: str,
+    output_path: Path,
+    config: Config,
+    ylabel: str,
+    title: str,
+) -> None:
+    """Plot member points plus ensemble mean and sample-standard-deviation."""
+    import os
+
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    if frame.empty:
+        raise ValueError(f"cannot plot empty {value_column} table")
+    experiments = [
+        experiment
+        for experiment in config.experiments
+        if experiment.name in set(frame["experiment"])
+    ]
+    if not experiments:
+        raise ValueError("plot table contains no configured experiments")
+
+    fig, ax = plt.subplots(figsize=(8.4, 5.0), dpi=150)
+    filter_offsets = np.linspace(-0.17, 0.17, len(config.filters))
+    for exp_index, experiment in enumerate(experiments):
+        for filter_index, filter_name in enumerate(config.filters):
+            subset = frame[
+                (frame["experiment"] == experiment.name)
+                & (frame["filter"] == filter_name)
+            ].sort_values("member")
+            if subset.empty:
+                raise ValueError(
+                    f"no data for {experiment.name}/{filter_name} in {value_column}"
+                )
+            group_x = exp_index + filter_offsets[filter_index]
+            jitter = np.linspace(-0.045, 0.045, len(subset))
+            ax.scatter(
+                group_x + jitter,
+                subset[value_column],
+                s=34,
+                marker=FILTER_MARKERS.get(filter_name, "o"),
+                facecolor=experiment.color,
+                edgecolor="white",
+                linewidth=0.6,
+                alpha=0.82,
+                zorder=3,
+            )
+            mean = float(subset["ensemble_mean"].iloc[0])
+            std = float(subset["ensemble_std"].iloc[0])
+            if not np.isfinite(std):
+                std = 0.0
+            ax.errorbar(
+                group_x,
+                mean,
+                yerr=std,
+                fmt="D",
+                color="black",
+                markerfacecolor="white",
+                markersize=6,
+                capsize=4,
+                linewidth=1.5,
+                zorder=4,
+            )
+
+    ax.set_xticks(np.arange(len(experiments)))
+    ax.set_xticklabels([experiment.label for experiment in experiments])
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.grid(axis="y", linestyle=":", linewidth=0.8, alpha=0.7)
+    ax.set_axisbelow(True)
+    handles = [
+        Line2D(
+            [0],
+            [0],
+            marker=FILTER_MARKERS.get(filter_name, "o"),
+            linestyle="none",
+            markerfacecolor="#666666",
+            markeredgecolor="white",
+            markersize=7,
+            label=filter_name,
+        )
+        for filter_name in config.filters
+    ]
+    handles.append(
+        Line2D(
+            [0],
+            [0],
+            marker="D",
+            linestyle="-",
+            color="black",
+            markerfacecolor="white",
+            markersize=6,
+            label="Ensemble mean ± 1 SD",
+        )
+    )
+    ax.legend(handles=handles, frameon=False, loc="best")
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def write_outputs(
+    lh: pd.DataFrame,
+    ohc: pd.DataFrame,
+    config: Config,
+) -> tuple[Path, Path, Path, Path]:
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    lh_csv = config.output_dir / "initial_tc150_lh_members.csv"
+    ohc_csv = config.output_dir / "initial_tc150_ohc_members.csv"
+    lh_png = config.output_dir / "initial_tc150_lh.png"
+    ohc_png = config.output_dir / "initial_tc150_ohc.png"
+    lh.to_csv(lh_csv, index=False)
+    ohc.to_csv(ohc_csv, index=False)
+    plot_member_comparison(
+        lh,
+        "lh_mean_w_m2",
+        lh_png,
+        config,
+        ylabel="Latent heat flux (W m$^{-2}$)",
+        title="Initial TC 150-km ocean latent heat flux",
+    )
+    plot_member_comparison(
+        ohc,
+        "ohc26_mean_kj_cm2",
+        ohc_png,
+        config,
+        ylabel="OHC26 (kJ cm$^{-2}$)",
+        title="Initial TC 150-km ocean heat content",
+    )
+    return lh_csv, ohc_csv, lh_png, ohc_png
+
+
+def main() -> None:
+    lh, ohc = calculate_member_records(CONFIG)
+    paths = write_outputs(lh, ohc, CONFIG)
+    for path in paths:
+        print(f"Saved {path}")
+
+
+if __name__ == "__main__":
+    main()
