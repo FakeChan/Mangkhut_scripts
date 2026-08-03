@@ -642,6 +642,174 @@ class WrfReaderAndWorkflowTests(unittest.TestCase):
         self.assertTrue((lh["stored_flux_used"] == False).all())  # noqa: E712
 
 
+def cached_member_frames(config: diag.Config) -> tuple[pd.DataFrame, pd.DataFrame]:
+    lh_rows = []
+    ohc_rows = []
+    for experiment in config.experiments:
+        for filter_name in config.filters:
+            for member in config.members:
+                common = {
+                    "experiment": experiment.name,
+                    "experiment_label": experiment.label,
+                    "filter": filter_name,
+                    "member": member,
+                    "ensemble_mean": 125.0,
+                    "ensemble_std": 5.0,
+                }
+                lh_rows.append({**common, "lh_mean_w_m2": 125.0})
+                if experiment.ocean_enabled:
+                    ohc_rows.append({**common, "ohc26_mean_kj_cm2": 82.0})
+    return pd.DataFrame(lh_rows), pd.DataFrame(ohc_rows)
+
+
+class CacheInputTests(unittest.TestCase):
+    def cache_config(self, root: Path) -> diag.Config:
+        return replace(
+            diag.CONFIG,
+            output_dir=root,
+            filters=("EAKF", "QCF_RHF"),
+            members=("001", "002"),
+            experiments=(
+                diag.Experiment("noda", "No DA", False, "#0072B2"),
+                diag.Experiment("weak", "Weak", True, "#D55E00"),
+            ),
+        )
+
+    def test_load_nr_cache_reads_one_finite_reference_row(self):
+        with TemporaryDirectory() as tmp:
+            config = self.cache_config(Path(tmp))
+            expected = pd.DataFrame(
+                {"lh_mean_w_m2": [175.0], "ohc26_mean_kj_cm2": [90.0]}
+            )
+            expected.to_csv(
+                config.output_dir / "initial_tc150_nr_reference.csv", index=False
+            )
+
+            got = diag.load_nr_cache(config)
+
+        pd.testing.assert_frame_equal(got, expected)
+
+    def test_load_member_cache_reads_complete_lh_and_ohc_tables(self):
+        with TemporaryDirectory() as tmp:
+            config = self.cache_config(Path(tmp))
+            expected_lh, expected_ohc = cached_member_frames(config)
+            expected_lh.to_csv(
+                config.output_dir / "initial_tc150_lh_members.csv", index=False
+            )
+            expected_ohc.to_csv(
+                config.output_dir / "initial_tc150_ohc_members.csv", index=False
+            )
+
+            got_lh, got_ohc = diag.load_member_cache(config)
+
+        pd.testing.assert_frame_equal(got_lh, expected_lh)
+        pd.testing.assert_frame_equal(got_ohc, expected_ohc)
+
+    def test_load_member_cache_rejects_missing_paired_ohc_csv(self):
+        with TemporaryDirectory() as tmp:
+            config = self.cache_config(Path(tmp))
+            lh, _ = cached_member_frames(config)
+            lh.to_csv(config.output_dir / "initial_tc150_lh_members.csv", index=False)
+
+            with self.assertRaisesRegex(FileNotFoundError, "ohc_members"):
+                diag.load_member_cache(config)
+
+    def test_load_member_cache_rejects_duplicate_member_key(self):
+        with TemporaryDirectory() as tmp:
+            config = self.cache_config(Path(tmp))
+            lh, ohc = cached_member_frames(config)
+            lh = pd.concat([lh, lh.iloc[[0]]], ignore_index=True)
+            lh.to_csv(config.output_dir / "initial_tc150_lh_members.csv", index=False)
+            ohc.to_csv(config.output_dir / "initial_tc150_ohc_members.csv", index=False)
+
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                diag.load_member_cache(config)
+
+    def test_load_member_cache_rejects_nonfinite_metric(self):
+        with TemporaryDirectory() as tmp:
+            config = self.cache_config(Path(tmp))
+            lh, ohc = cached_member_frames(config)
+            lh.loc[0, "lh_mean_w_m2"] = np.nan
+            lh.to_csv(config.output_dir / "initial_tc150_lh_members.csv", index=False)
+            ohc.to_csv(config.output_dir / "initial_tc150_ohc_members.csv", index=False)
+
+            with self.assertRaisesRegex(ValueError, "nonfinite"):
+                diag.load_member_cache(config)
+
+    def test_load_member_cache_rejects_incomplete_configured_coverage(self):
+        with TemporaryDirectory() as tmp:
+            config = self.cache_config(Path(tmp))
+            lh, ohc = cached_member_frames(config)
+            lh.iloc[:-1].to_csv(
+                config.output_dir / "initial_tc150_lh_members.csv", index=False
+            )
+            ohc.to_csv(config.output_dir / "initial_tc150_ohc_members.csv", index=False)
+
+            with self.assertRaisesRegex(ValueError, "configured coverage"):
+                diag.load_member_cache(config)
+
+
+class CacheSwitchTests(unittest.TestCase):
+    def test_cache_switches_default_to_recalculation(self):
+        self.assertFalse(diag.CONFIG.read_nr_from_csv)
+        self.assertFalse(diag.CONFIG.read_members_from_csv)
+
+    def test_resolve_results_can_cache_nr_and_calculate_members(self):
+        nr = pd.DataFrame(
+            {"lh_mean_w_m2": [175.0], "ohc26_mean_kj_cm2": [90.0]}
+        )
+        lh = pd.DataFrame({"lh_mean_w_m2": [120.0]})
+        ohc = pd.DataFrame({"ohc26_mean_kj_cm2": [80.0]})
+        config = replace(
+            diag.CONFIG,
+            read_nr_from_csv=True,
+            read_members_from_csv=False,
+        )
+        with (
+            patch.object(diag, "load_nr_cache", return_value=nr),
+            patch.object(diag, "calculate_member_records", return_value=(lh, ohc)),
+            patch.object(
+                diag,
+                "find_unique_wrfout",
+                side_effect=AssertionError("NR calculation must be skipped"),
+            ),
+        ):
+            got_lh, got_ohc, got_nr = diag.resolve_diagnostic_tables(config)
+
+        self.assertIs(got_lh, lh)
+        self.assertIs(got_ohc, ohc)
+        self.assertIs(got_nr, nr)
+
+    def test_resolve_results_can_calculate_nr_and_cache_members(self):
+        nr = pd.DataFrame(
+            {"lh_mean_w_m2": [175.0], "ohc26_mean_kj_cm2": [90.0]}
+        )
+        lh = pd.DataFrame({"lh_mean_w_m2": [120.0]})
+        ohc = pd.DataFrame({"ohc26_mean_kj_cm2": [80.0]})
+        nr_path = Path("nr.nc")
+        config = replace(
+            diag.CONFIG,
+            read_nr_from_csv=False,
+            read_members_from_csv=True,
+        )
+        with (
+            patch.object(diag, "load_member_cache", return_value=(lh, ohc)),
+            patch.object(diag, "find_unique_wrfout", return_value=nr_path),
+            patch.object(diag, "read_tc_center", return_value=(20.0, 120.0, 950.0)),
+            patch.object(diag, "calculate_nr_reference", return_value=nr),
+            patch.object(
+                diag,
+                "calculate_member_records",
+                side_effect=AssertionError("member calculation must be skipped"),
+            ),
+        ):
+            got_lh, got_ohc, got_nr = diag.resolve_diagnostic_tables(config)
+
+        self.assertIs(got_lh, lh)
+        self.assertIs(got_ohc, ohc)
+        self.assertIs(got_nr, nr)
+
+
 class OutputTests(unittest.TestCase):
     def test_plot_member_comparison_draws_solid_red_nr_reference_line(self):
         with TemporaryDirectory() as tmp:
@@ -740,6 +908,47 @@ class OutputTests(unittest.TestCase):
             )
             self.assertTrue(all(path.stat().st_size > 0 for path in paths))
             self.assertEqual(len(list(output_dir.glob("*.png"))), 2)
+
+    def test_write_outputs_does_not_rewrite_csvs_loaded_as_cache(self):
+        with TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            config = replace(
+                diag.CONFIG,
+                output_dir=output_dir,
+                filters=("EAKF", "QCF_RHF"),
+                members=("001", "002"),
+                experiments=(
+                    diag.Experiment("noda", "No DA", False, "#0072B2"),
+                    diag.Experiment("weak", "Weak", True, "#D55E00"),
+                ),
+            )
+            lh, ohc = cached_member_frames(config)
+            nr = pd.DataFrame(
+                {"lh_mean_w_m2": [175.0], "ohc26_mean_kj_cm2": [90.0]}
+            )
+            paths = {
+                "lh": output_dir / "initial_tc150_lh_members.csv",
+                "ohc": output_dir / "initial_tc150_ohc_members.csv",
+                "nr": output_dir / "initial_tc150_nr_reference.csv",
+            }
+            lh.to_csv(paths["lh"], index=False)
+            ohc.to_csv(paths["ohc"], index=False)
+            nr.to_csv(paths["nr"], index=False)
+            before = {name: path.read_bytes() for name, path in paths.items()}
+
+            outputs = diag.write_outputs(
+                lh,
+                ohc,
+                nr,
+                config,
+                write_member_csv=False,
+                write_nr_csv=False,
+            )
+
+            after = {name: path.read_bytes() for name, path in paths.items()}
+            self.assertEqual(after, before)
+            self.assertTrue(outputs[-2].is_file())
+            self.assertTrue(outputs[-1].is_file())
 
 
 if __name__ == "__main__":

@@ -60,6 +60,8 @@ class Config:
     filters: tuple[str, ...]
     members: tuple[str, ...]
     experiments: tuple[Experiment, ...]
+    read_nr_from_csv: bool = False
+    read_members_from_csv: bool = False
     radius_km: float = 150.0
     ocean_density_kg_m3: float = 1025.0
     ocean_cp_j_kg_k: float = 3985.0
@@ -96,6 +98,8 @@ CONFIG = Config(
             "6mem_oceanAssim1Run1", "Strong-couple DA", True, "#009E73"
         ),
     ),
+    read_nr_from_csv=False,
+    read_members_from_csv=False,
 )
 
 
@@ -970,6 +974,134 @@ def calculate_member_records(
 
 FILTER_MARKERS = {"EAKF": "o", "QCF_RHF": "s"}
 
+_CACHE_KEY_COLUMNS = ["experiment", "filter", "member"]
+
+
+def _read_cache_csv(path: Path) -> pd.DataFrame:
+    if not path.is_file():
+        raise FileNotFoundError(f"cache CSV does not exist: {path}")
+    try:
+        frame = pd.read_csv(
+            path,
+            dtype={
+                "experiment": str,
+                "experiment_label": str,
+                "filter": str,
+                "member": str,
+            },
+        )
+    except Exception as exc:
+        raise ValueError(f"could not read cache CSV {path}: {exc}") from exc
+    if frame.empty:
+        raise ValueError(f"cache CSV is empty: {path}")
+    return frame
+
+
+def _validate_cache_columns(
+    frame: pd.DataFrame,
+    path: Path,
+    required: set[str],
+    numeric: set[str],
+) -> None:
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(f"cache CSV {path} is missing columns: {sorted(missing)}")
+    for column in numeric:
+        try:
+            frame[column] = pd.to_numeric(frame[column], errors="raise")
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"cache CSV {path} has nonnumeric {column} values"
+            ) from exc
+        if not np.isfinite(frame[column].to_numpy(dtype=float)).all():
+            raise ValueError(f"cache CSV {path} has nonfinite {column} values")
+
+
+def load_nr_cache(config: Config) -> pd.DataFrame:
+    """Read and validate the one-row NR LH/OHC reference cache."""
+    path = config.output_dir / "initial_tc150_nr_reference.csv"
+    frame = _read_cache_csv(path)
+    required = {"lh_mean_w_m2", "ohc26_mean_kj_cm2"}
+    _validate_cache_columns(frame, path, required, required)
+    if len(frame) != 1:
+        raise ValueError(f"NR cache CSV must contain exactly one row: {path}")
+    print(f"Reading cached NR reference: {path}")
+    return frame
+
+
+def _validate_member_cache(
+    frame: pd.DataFrame,
+    path: Path,
+    value_column: str,
+    expected_keys: set[tuple[str, str, str]],
+) -> None:
+    required = set(_CACHE_KEY_COLUMNS) | {
+        "experiment_label",
+        value_column,
+        "ensemble_mean",
+        "ensemble_std",
+    }
+    numeric = {value_column, "ensemble_mean", "ensemble_std"}
+    _validate_cache_columns(frame, path, required, numeric)
+    if frame.duplicated(_CACHE_KEY_COLUMNS).any():
+        raise ValueError(f"cache CSV contains duplicate member keys: {path}")
+    actual_keys = set(frame[_CACHE_KEY_COLUMNS].itertuples(index=False, name=None))
+    if actual_keys != expected_keys:
+        missing = sorted(expected_keys - actual_keys)
+        extra = sorted(actual_keys - expected_keys)
+        raise ValueError(
+            f"cache CSV does not match configured coverage: {path}; "
+            f"missing={missing}, extra={extra}"
+        )
+
+
+def load_member_cache(config: Config) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Read the complete paired LH and OHC member caches."""
+    lh_path = config.output_dir / "initial_tc150_lh_members.csv"
+    ohc_path = config.output_dir / "initial_tc150_ohc_members.csv"
+    lh = _read_cache_csv(lh_path)
+    ohc = _read_cache_csv(ohc_path)
+    expected_lh = {
+        (experiment.name, filter_name, member)
+        for experiment in config.experiments
+        for filter_name in config.filters
+        for member in config.members
+    }
+    expected_ohc = {
+        (experiment.name, filter_name, member)
+        for experiment in config.experiments
+        if experiment.ocean_enabled
+        for filter_name in config.filters
+        for member in config.members
+    }
+    _validate_member_cache(lh, lh_path, "lh_mean_w_m2", expected_lh)
+    _validate_member_cache(ohc, ohc_path, "ohc26_mean_kj_cm2", expected_ohc)
+    print(f"Reading cached member LH: {lh_path}")
+    print(f"Reading cached member OHC: {ohc_path}")
+    return lh, ohc
+
+
+def resolve_diagnostic_tables(
+    config: Config,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Independently load or calculate member and NR diagnostic tables."""
+    if config.read_nr_from_csv:
+        nr_reference = load_nr_cache(config)
+    else:
+        nr_path = find_unique_wrfout(
+            config.nr_root, config.nr_domain, config.valid_time
+        )
+        center_lat, center_lon, _ = read_tc_center(nr_path)
+        nr_reference = calculate_nr_reference(
+            config, nr_path, center_lat=center_lat, center_lon=center_lon
+        )
+
+    if config.read_members_from_csv:
+        lh, ohc = load_member_cache(config)
+    else:
+        lh, ohc = calculate_member_records(config)
+    return lh, ohc, nr_reference
+
 
 def plot_member_comparison(
     frame: pd.DataFrame,
@@ -1093,6 +1225,9 @@ def write_outputs(
     ohc: pd.DataFrame,
     nr_reference: pd.DataFrame,
     config: Config,
+    *,
+    write_member_csv: bool = True,
+    write_nr_csv: bool = True,
 ) -> tuple[Path, Path, Path, Path, Path]:
     if len(nr_reference) != 1:
         raise ValueError("NR reference table must contain exactly one row")
@@ -1107,9 +1242,11 @@ def write_outputs(
     nr_csv = config.output_dir / "initial_tc150_nr_reference.csv"
     lh_png = config.output_dir / "initial_tc150_lh.png"
     ohc_png = config.output_dir / "initial_tc150_ohc.png"
-    lh.to_csv(lh_csv, index=False)
-    ohc.to_csv(ohc_csv, index=False)
-    nr_reference.to_csv(nr_csv, index=False)
+    if write_member_csv:
+        lh.to_csv(lh_csv, index=False)
+        ohc.to_csv(ohc_csv, index=False)
+    if write_nr_csv:
+        nr_reference.to_csv(nr_csv, index=False)
     plot_member_comparison(
         lh,
         "lh_mean_w_m2",
@@ -1132,13 +1269,15 @@ def write_outputs(
 
 
 def main() -> None:
-    nr_path = find_unique_wrfout(CONFIG.nr_root, CONFIG.nr_domain, CONFIG.valid_time)
-    center_lat, center_lon, _ = read_tc_center(nr_path)
-    nr_reference = calculate_nr_reference(
-        CONFIG, nr_path, center_lat=center_lat, center_lon=center_lon
+    lh, ohc, nr_reference = resolve_diagnostic_tables(CONFIG)
+    paths = write_outputs(
+        lh,
+        ohc,
+        nr_reference,
+        CONFIG,
+        write_member_csv=not CONFIG.read_members_from_csv,
+        write_nr_csv=not CONFIG.read_nr_from_csv,
     )
-    lh, ohc = calculate_member_records(CONFIG)
-    paths = write_outputs(lh, ohc, nr_reference, CONFIG)
     for path in paths:
         print(f"Saved {path}")
 
