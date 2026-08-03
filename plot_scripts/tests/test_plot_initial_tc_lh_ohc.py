@@ -4,6 +4,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -232,6 +233,64 @@ def synthetic_member_dataset(include_ocean: bool = True) -> xr.Dataset:
 
 
 class WrfReaderAndWorkflowTests(unittest.TestCase):
+    def test_nr_lh_prefers_stored_lh_when_qfx_disagrees(self):
+        ds = synthetic_member_dataset(include_ocean=True)
+        ds["LH"][:] = np.array([[[100.0, 110.0, 120.0], [130.0, 140.0, 150.0]]])
+        ds["QFX"][:] = 1.0e-3
+        mask = np.array([[True, True, False], [False, False, False]])
+
+        with self.assertWarnsRegex(RuntimeWarning, "LH.*QFX"):
+            value, source = diag.read_stored_nr_lh(ds, mask)
+
+        self.assertEqual(source, "LH")
+        self.assertAlmostEqual(value, 105.0)
+
+    def test_nr_lh_falls_back_to_qfx_when_lh_is_missing(self):
+        ds = synthetic_member_dataset(include_ocean=True).drop_vars("LH")
+        ds["QFX"][:] = np.array(
+            [[[4.0e-5, 8.0e-5, 0.0], [0.0, 0.0, 0.0]]]
+        )
+        mask = np.array([[True, True, False], [False, False, False]])
+
+        value, source = diag.read_stored_nr_lh(ds, mask)
+
+        self.assertEqual(source, "QFX")
+        self.assertAlmostEqual(value, 150.0)
+
+    def test_nr_reference_uses_nr_native_mask_for_lh_and_ohc(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = replace(
+                diag.CONFIG,
+                nr_root=root,
+                nr_domain="d03",
+                valid_time="2018-09-10_00:00:00",
+                radius_km=150.0,
+            )
+            nr_path = root / f"wrfout_d03_{config.valid_time}"
+            nr = synthetic_member_dataset(include_ocean=True)
+            nr["LH"][:] = 175.0
+            nr["QFX"][:] = 175.0 / 2.5e6
+            nr.to_netcdf(nr_path)
+
+            reference = diag.calculate_nr_reference(
+                config,
+                nr_path,
+                center_lat=20.0,
+                center_lon=120.0,
+            )
+
+        self.assertEqual(len(reference), 1)
+        row = reference.iloc[0]
+        self.assertEqual(row["input_path"], str(nr_path))
+        self.assertEqual(row["lh_source"], "LH")
+        self.assertEqual(row["tc_ocean_points"], 6)
+        self.assertEqual(row["lh_finite_points"], 6)
+        self.assertEqual(row["ohc_finite_points"], 6)
+        self.assertAlmostEqual(row["lh_mean_w_m2"], 175.0)
+        expected_ohc = 1025.0 * 3985.0 * 22.5 / 1.0e7
+        self.assertAlmostEqual(row["ohc26_mean_kj_cm2"], expected_ohc)
+
     def test_surface_solver_excludes_unselected_invalid_land_point(self):
         def field(ocean_value: float, land_value: float) -> np.ndarray:
             return np.array([[ocean_value, land_value]], dtype=float)
@@ -584,7 +643,49 @@ class WrfReaderAndWorkflowTests(unittest.TestCase):
 
 
 class OutputTests(unittest.TestCase):
-    def test_write_outputs_creates_two_csvs_and_two_separate_pngs(self):
+    def test_plot_member_comparison_draws_solid_red_nr_reference_line(self):
+        with TemporaryDirectory() as tmp:
+            import matplotlib.pyplot as plt
+
+            config = replace(
+                diag.CONFIG,
+                output_dir=Path(tmp),
+                filters=("EAKF",),
+                experiments=(diag.Experiment("weak", "Weak", True, "#D55E00"),),
+            )
+            frame = pd.DataFrame(
+                {
+                    "experiment": ["weak", "weak"],
+                    "experiment_label": ["Weak", "Weak"],
+                    "filter": ["EAKF", "EAKF"],
+                    "member": ["001", "002"],
+                    "lh_mean_w_m2": [120.0, 130.0],
+                    "ensemble_mean": [125.0, 125.0],
+                    "ensemble_std": [np.sqrt(50.0), np.sqrt(50.0)],
+                }
+            )
+            with patch("matplotlib.pyplot.close"):
+                diag.plot_member_comparison(
+                    frame,
+                    "lh_mean_w_m2",
+                    Path(tmp) / "lh.png",
+                    config,
+                    ylabel="LH",
+                    title="LH comparison",
+                    nr_value=175.0,
+                )
+                figure = plt.gcf()
+
+            nr_lines = [
+                line for line in figure.axes[0].lines if line.get_label() == "NR"
+            ]
+            self.assertEqual(len(nr_lines), 1)
+            np.testing.assert_allclose(nr_lines[0].get_ydata(), [175.0, 175.0])
+            self.assertEqual(nr_lines[0].get_color().lower(), "#d73027")
+            self.assertEqual(nr_lines[0].get_linestyle(), "-")
+            plt.close(figure)
+
+    def test_write_outputs_creates_nr_csv_and_two_separate_pngs(self):
         with TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
             config = replace(
@@ -619,12 +720,20 @@ class OutputTests(unittest.TestCase):
                     "ensemble_std": [0.0, 0.0],
                 }
             )
-            paths = diag.write_outputs(lh, ohc, config)
+            nr_reference = pd.DataFrame(
+                {
+                    "lh_mean_w_m2": [175.0],
+                    "ohc26_mean_kj_cm2": [90.0],
+                    "lh_source": ["LH"],
+                }
+            )
+            paths = diag.write_outputs(lh, ohc, nr_reference, config)
             self.assertEqual(
                 [path.name for path in paths],
                 [
                     "initial_tc150_lh_members.csv",
                     "initial_tc150_ohc_members.csv",
+                    "initial_tc150_nr_reference.csv",
                     "initial_tc150_lh.png",
                     "initial_tc150_ohc.png",
                 ],

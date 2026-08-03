@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -20,6 +21,7 @@ try:
         SfclayOptions,
         SurfaceFluxResult,
         SurfaceState,
+        XLV_J_KG,
         revised_mm5_ocean_flux,
     )
 except ModuleNotFoundError:  # Direct execution from plot_scripts/.
@@ -28,6 +30,7 @@ except ModuleNotFoundError:  # Direct execution from plot_scripts/.
         SfclayOptions,
         SurfaceFluxResult,
         SurfaceState,
+        XLV_J_KG,
         revised_mm5_ocean_flux,
     )
 
@@ -740,6 +743,113 @@ def _ohc_on_mask(
     return float(array.mean()), int(array.size)
 
 
+def read_stored_nr_lh(
+    ds: xr.Dataset,
+    mask: np.ndarray,
+    y_slice: slice = slice(None),
+    x_slice: slice = slice(None),
+) -> tuple[float, str]:
+    """Read mean NR LH on ``mask``, falling back to latent heat times QFX."""
+    selected = np.asarray(mask, dtype=bool)
+    if selected.ndim != 2 or not np.any(selected):
+        raise ValueError("NR LH mask must be a nonempty 2-D array")
+    if "LH" not in ds and "QFX" not in ds:
+        raise KeyError("NR requires stored LH or QFX")
+
+    lh = _mass_2d(ds, "LH", y_slice, x_slice) if "LH" in ds else None
+    qfx = _mass_2d(ds, "QFX", y_slice, x_slice) if "QFX" in ds else None
+    for name, values in (("LH", lh), ("QFX", qfx)):
+        if values is None:
+            continue
+        if values.shape != selected.shape:
+            raise ValueError(
+                f"NR {name} shape {values.shape} does not match mask {selected.shape}"
+            )
+        if not np.isfinite(values[selected]).all():
+            raise ValueError(f"NR {name} contains nonfinite selected values")
+
+    if lh is not None:
+        if qfx is not None and not np.allclose(
+            lh[selected],
+            XLV_J_KG * qfx[selected],
+            rtol=1.0e-3,
+            atol=0.1,
+        ):
+            max_difference = float(
+                np.max(np.abs(lh[selected] - XLV_J_KG * qfx[selected]))
+            )
+            warnings.warn(
+                "stored NR LH differs from XLV * QFX over the selected region; "
+                f"using LH (maximum absolute difference {max_difference:.6g} W m-2)",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        return float(lh[selected].mean()), "LH"
+    assert qfx is not None
+    return float((XLV_J_KG * qfx[selected]).mean()), "QFX"
+
+
+def calculate_nr_reference(
+    config: Config,
+    nr_path: Path,
+    center_lat: float,
+    center_lon: float,
+) -> pd.DataFrame:
+    """Calculate one native-grid NR reference row for LH and OHC26."""
+    nr_path = Path(nr_path)
+    print(f"Reading NR reference: {nr_path}")
+    with xr.open_dataset(nr_path, decode_times=False) as ds:
+        static_grid = read_static_grid(ds)
+        mask = tc_ocean_mask(
+            static_grid.lats,
+            static_grid.lons,
+            center_lat,
+            center_lon,
+            config.radius_km,
+            static_grid.ocean,
+        )
+        y_slice, x_slice = mask_bounding_slices(mask)
+        local_mask = mask[y_slice, x_slice]
+        lh_mean, lh_source = read_stored_nr_lh(
+            ds, local_mask, y_slice=y_slice, x_slice=x_slice
+        )
+        selected_rows, selected_columns = np.where(local_mask)
+        temperature_c, depth_m = read_ohc_inputs(
+            ds,
+            y_slice=y_slice,
+            x_slice=x_slice,
+            depth_reference_index=(
+                int(selected_rows[0]),
+                int(selected_columns[0]),
+            ),
+        )
+        ohc_j_m2, ohc_points = _ohc_on_mask(
+            temperature_c,
+            depth_m,
+            local_mask,
+            config.ocean_density_kg_m3,
+            config.ocean_cp_j_kg_k,
+        )
+
+    return pd.DataFrame(
+        [
+            {
+                "input_path": str(nr_path),
+                "center_lat": center_lat,
+                "center_lon": center_lon,
+                "radius_km": config.radius_km,
+                "tc_ocean_points": int(mask.sum()),
+                "lh_source": lh_source,
+                "lh_mean_w_m2": lh_mean,
+                "lh_finite_points": int(mask.sum()),
+                "ohc26_mean_j_m2": ohc_j_m2,
+                "ohc26_mean_kj_cm2": ohc_j_m2 / 1.0e7,
+                "ohc_finite_points": ohc_points,
+            }
+        ]
+    )
+
+
 def calculate_member_records(
     config: Config,
     slp_reader: Callable[[Path], np.ndarray] | None = None,
@@ -868,6 +978,7 @@ def plot_member_comparison(
     config: Config,
     ylabel: str,
     title: str,
+    nr_value: float,
 ) -> None:
     """Plot member points plus ensemble mean and sample-standard-deviation."""
     import os
@@ -885,8 +996,18 @@ def plot_member_comparison(
     ]
     if not experiments:
         raise ValueError("plot table contains no configured experiments")
+    if not np.isfinite(nr_value):
+        raise ValueError(f"NR reference for {value_column} must be finite")
 
     fig, ax = plt.subplots(figsize=(8.4, 5.0), dpi=150)
+    nr_line = ax.axhline(
+        nr_value,
+        color="#d73027",
+        linestyle="-",
+        linewidth=1.6,
+        label="NR",
+        zorder=2,
+    )
     filter_offsets = np.linspace(-0.17, 0.17, len(config.filters))
     for exp_index, experiment in enumerate(experiments):
         for filter_index, filter_name in enumerate(config.filters):
@@ -959,6 +1080,7 @@ def plot_member_comparison(
             label="Ensemble mean ± 1 SD",
         )
     )
+    handles.append(nr_line)
     ax.legend(handles=handles, frameon=False, loc="best")
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -969,15 +1091,25 @@ def plot_member_comparison(
 def write_outputs(
     lh: pd.DataFrame,
     ohc: pd.DataFrame,
+    nr_reference: pd.DataFrame,
     config: Config,
-) -> tuple[Path, Path, Path, Path]:
+) -> tuple[Path, Path, Path, Path, Path]:
+    if len(nr_reference) != 1:
+        raise ValueError("NR reference table must contain exactly one row")
+    required_nr_columns = {"lh_mean_w_m2", "ohc26_mean_kj_cm2"}
+    missing_nr_columns = required_nr_columns.difference(nr_reference.columns)
+    if missing_nr_columns:
+        raise KeyError(f"NR reference is missing columns: {sorted(missing_nr_columns)}")
+    nr_row = nr_reference.iloc[0]
     config.output_dir.mkdir(parents=True, exist_ok=True)
     lh_csv = config.output_dir / "initial_tc150_lh_members.csv"
     ohc_csv = config.output_dir / "initial_tc150_ohc_members.csv"
+    nr_csv = config.output_dir / "initial_tc150_nr_reference.csv"
     lh_png = config.output_dir / "initial_tc150_lh.png"
     ohc_png = config.output_dir / "initial_tc150_ohc.png"
     lh.to_csv(lh_csv, index=False)
     ohc.to_csv(ohc_csv, index=False)
+    nr_reference.to_csv(nr_csv, index=False)
     plot_member_comparison(
         lh,
         "lh_mean_w_m2",
@@ -985,6 +1117,7 @@ def write_outputs(
         config,
         ylabel="Latent heat flux (W m$^{-2}$)",
         title="Initial TC 150-km ocean latent heat flux",
+        nr_value=float(nr_row["lh_mean_w_m2"]),
     )
     plot_member_comparison(
         ohc,
@@ -993,13 +1126,19 @@ def write_outputs(
         config,
         ylabel="OHC26 (kJ cm$^{-2}$)",
         title="Initial TC 150-km ocean heat content",
+        nr_value=float(nr_row["ohc26_mean_kj_cm2"]),
     )
-    return lh_csv, ohc_csv, lh_png, ohc_png
+    return lh_csv, ohc_csv, nr_csv, lh_png, ohc_png
 
 
 def main() -> None:
+    nr_path = find_unique_wrfout(CONFIG.nr_root, CONFIG.nr_domain, CONFIG.valid_time)
+    center_lat, center_lon, _ = read_tc_center(nr_path)
+    nr_reference = calculate_nr_reference(
+        CONFIG, nr_path, center_lat=center_lat, center_lon=center_lon
+    )
     lh, ohc = calculate_member_records(CONFIG)
-    paths = write_outputs(lh, ohc, CONFIG)
+    paths = write_outputs(lh, ohc, nr_reference, CONFIG)
     for path in paths:
         print(f"Saved {path}")
 
