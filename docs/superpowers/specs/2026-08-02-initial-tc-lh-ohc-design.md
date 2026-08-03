@@ -127,6 +127,37 @@ friction velocity and stability converge.
 The implementation preserves the WRF 4.1 nonnegative ocean evaporation limit
 `QFX = max(QFX, 0)`.
 
+## XTIME-Aware Latent Heat Flux Source
+
+The same LH-source decision applies to every ensemble member and the NR. The
+script requires one finite scalar `XTIME`, interpreted in WRF minutes since the
+simulation start, and uses `np.isclose(XTIME, 0)` to identify an initial
+history output. Stored-flux readiness is evaluated only over the selected
+150-km ocean mask, never over land or the full domain.
+
+At `XTIME=0`, missing stored `LH`/`QFX` or values that are all numerically zero
+indicate an uninitialized initial flux, so LH is reconstructed from the current
+WRF 4.1 Revised-MM5 state algorithm. If either stored field already contains
+finite nonzero selected values, the stored diagnostics are used instead: a
+nonzero `LH` has priority, while nonzero `QFX` is converted with
+`LH=2.5e6*QFX` when `LH` is absent or still zero.
+
+At `XTIME>0`, stored output is required. `LH` is preferred when finite and
+nonzero; `QFX` is the fallback when `LH` is missing or zero. If all available
+stored flux values are zero, the script warns and preserves the stored zero
+rather than silently reconstructing an integrated output. Missing or nonfinite
+stored flux at `XTIME>0` is a hard error.
+
+Whenever both fields provide nonzero information, `LH` is checked against
+`2.5e6*QFX`; a material mismatch warns while stored `LH` remains authoritative.
+Zero tests use `rtol=0`, `atol=1e-6 W m-2` for LH, and
+`atol=1e-12 kg m-2 s-1` for QFX. Every output row records `xtime_minutes`,
+`lh_source` (`reconstructed_initial`, `stored_LH`, or `derived_QFX`), and the
+corresponding `stored_flux_used` boolean.
+
+OHC26 never branches on `XTIME`; it is always calculated from `OM_TMP` and
+`OM_DEPTH` with the common OHC integration.
+
 ## OHC26 Calculation
 
 OHC is computed only for:
@@ -183,16 +214,18 @@ members are required; missing or nonfinite member means stop the calculation.
 
 ## Outputs
 
-The script writes four files below a configurable output directory:
+The script writes five files below a configurable output directory:
 
 - `initial_tc150_lh_members.csv`;
 - `initial_tc150_ohc_members.csv`;
+- `initial_tc150_nr_reference.csv`;
 - `initial_tc150_lh.png`;
 - `initial_tc150_ohc.png`.
 
-Each CSV contains experiment, display label, filter, member, center coordinates,
-selected gridpoint counts, the member regional mean, and the corresponding
-experiment/filter ensemble mean and sample standard deviation.
+The two member CSVs contain experiment, display label, filter, member, center
+coordinates, selected gridpoint counts, the member regional mean, and the
+corresponding experiment/filter ensemble mean and sample standard deviation.
+The separate NR CSV contains one truth-reference row as specified below.
 
 The LH figure contains all three experiments. The OHC figure contains only the
 two ocean-running experiments. Within each experiment, EAKF and QCF_RHF are
@@ -201,6 +234,64 @@ overlaid ensemble mean and standard-deviation error bar. Experiment colors use
 the existing colorblind-safe palette; filters use distinct marker shapes. The
 figures use independent scientifically meaningful y-axis units:
 `W m-2` for LH and `kJ cm-2` for OHC.
+
+## Nature-Run Reference Values
+
+The diagnostic also calculates one nature-run (NR) reference value for LH and
+one for OHC26 at the configured valid time. The NR file and minimum-SLP center
+are the same file and center already used to define every experiment's 150-km
+region. Experiment values continue to map this common NR center onto each
+member grid; NR values apply the same 150-km ocean mask directly on the NR
+native grid.
+
+NR latent heat flux follows the same XTIME-aware rule as ensemble members. A
+continuous NR output (`XTIME>0`) uses its stored `LH`, or derives LH from
+stored `QFX` when necessary. An NR initial output (`XTIME=0`) is reconstructed
+only when the selected stored fields are missing or all zero. When both fields
+provide nonzero information, the diagnostic compares `LH` against
+`2.5e6*QFX`; a material mismatch warns while stored `LH` remains authoritative.
+Incompatible grid shapes and nonfinite selected values are hard errors.
+
+NR OHC26 uses the same `OM_TMP`, `OM_DEPTH`, density, heat capacity,
+first-26-C crossing, and integration implementation as the ocean-running
+experiments. The NR result is kept separate from member and ensemble
+statistics because it is a single truth value, not an
+experiment/filter/member sample.
+
+The one-row `initial_tc150_nr_reference.csv` records the NR input path, center,
+selected ocean-point counts, XTIME, audited LH source, whether a stored flux
+was used, LH, and OHC26.
+Both figures draw the matching NR value as a solid horizontal line spanning
+all experiments. The line uses the established NR red `#d73027`, is labelled
+`NR`, and participates in automatic y-axis limits.
+
+## Optional CSV Cache Input
+
+Two independent booleans in the in-script `Config` control reuse of existing
+CSV outputs:
+
+- `read_nr_from_csv=False` recalculates the NR reference; `True` reads
+  `initial_tc150_nr_reference.csv`;
+- `read_members_from_csv=False` recalculates all member values; `True` reads
+  both `initial_tc150_lh_members.csv` and `initial_tc150_ohc_members.csv`.
+
+The cache paths are derived from `output_dir`; no command-line arguments or
+additional path settings are required. Cached NR and member results can be
+selected independently. When both switches are true, plotting requires no
+NetCDF calculation. When only the member cache is disabled, member calculation
+still reads the NR file to diagnose the common TC center even if the NR metric
+itself comes from CSV.
+
+Cache mode is strict: missing, empty, malformed, nonfinite, duplicated, or
+configuration-incompatible CSV content stops with a path-specific error. The
+member cache must contain exactly the configured experiment/filter/member
+combinations for LH and exactly the configured ocean-enabled combinations for
+OHC. No partial cache/recalculation mixture is allowed within the member
+dataset. A CSV used as input is not rewritten; figures are regenerated from
+the loaded values, while newly calculated data continue to be written to CSV.
+Cached NR and member rows must include finite `xtime_minutes`, a valid
+`lh_source`, and a consistent `stored_flux_used` value, so pre-feature caches
+require one recalculation before reuse.
 
 ## Error Handling and Auditability
 
@@ -235,7 +326,15 @@ Automated tests use small synthetic arrays and NetCDF fixtures to verify:
 - zero OHC26 for a cool surface and rejection of a missing crossing;
 - explicit OHC exclusion for the no-ocean experiment;
 - member, ensemble-mean, and sample-standard-deviation table contents;
-- creation of two separate nonempty PNG figures.
+- direct NR `LH` precedence and `QFX` fallback;
+- NR OHC26 on the NR-native 150-km ocean mask;
+- independent NR and member CSV-cache switches;
+- unified member/NR `XTIME` and stored-flux source selection;
+- initial-zero reconstruction and integrated-output stored-flux behavior;
+- strict cache schema, finiteness, uniqueness, and configuration validation;
+- no rewrite of CSV files selected as cache inputs;
+- creation of the NR reference CSV and two separate nonempty PNG figures;
+- a solid NR reference line on both figures.
 
 Verification uses `/Users/kcfu/miniforge3/envs/wrf/bin/python` consistently,
 following the project execution preference. Because the cluster data paths are

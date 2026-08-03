@@ -76,6 +76,15 @@ class StaticGrid:
     terrain_height_m: np.ndarray
 
 
+@dataclass(frozen=True)
+class LatentHeatDiagnostic:
+    mean_w_m2: float
+    finite_points: int
+    xtime_minutes: float
+    source: str
+    stored_flux_used: bool
+
+
 # =============================================================================
 # User configuration
 # =============================================================================
@@ -747,18 +756,26 @@ def _ohc_on_mask(
     return float(array.mean()), int(array.size)
 
 
-def read_stored_nr_lh(
+def read_xtime_minutes(ds: xr.Dataset) -> float:
+    """Read the single finite WRF XTIME value in minutes."""
+    if "XTIME" not in ds:
+        raise KeyError("XTIME is required to choose the latent-heat source")
+    values = np.asarray(_time0(ds["XTIME"]).values, dtype=float).reshape(-1)
+    if values.size != 1 or not np.isfinite(values[0]):
+        raise ValueError("XTIME must contain one finite value at the selected time")
+    return float(values[0])
+
+
+def _stored_flux_on_mask(
     ds: xr.Dataset,
     mask: np.ndarray,
     y_slice: slice = slice(None),
     x_slice: slice = slice(None),
-) -> tuple[float, str]:
-    """Read mean NR LH on ``mask``, falling back to latent heat times QFX."""
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Read and validate stored LH/QFX values on a selected local mask."""
     selected = np.asarray(mask, dtype=bool)
     if selected.ndim != 2 or not np.any(selected):
-        raise ValueError("NR LH mask must be a nonempty 2-D array")
-    if "LH" not in ds and "QFX" not in ds:
-        raise KeyError("NR requires stored LH or QFX")
+        raise ValueError("LH mask must be a nonempty 2-D array")
 
     lh = _mass_2d(ds, "LH", y_slice, x_slice) if "LH" in ds else None
     qfx = _mass_2d(ds, "QFX", y_slice, x_slice) if "QFX" in ds else None
@@ -767,30 +784,110 @@ def read_stored_nr_lh(
             continue
         if values.shape != selected.shape:
             raise ValueError(
-                f"NR {name} shape {values.shape} does not match mask {selected.shape}"
+                f"{name} shape {values.shape} does not match mask {selected.shape}"
             )
         if not np.isfinite(values[selected]).all():
-            raise ValueError(f"NR {name} contains nonfinite selected values")
+            raise ValueError(f"{name} contains nonfinite selected values")
+    return (
+        None if lh is None else lh[selected],
+        None if qfx is None else qfx[selected],
+    )
 
-    if lh is not None:
-        if qfx is not None and not np.allclose(
-            lh[selected],
-            XLV_J_KG * qfx[selected],
+
+def diagnose_lh_on_mask(
+    ds: xr.Dataset,
+    mask: np.ndarray,
+    use_ocean_sst: bool,
+    static_grid: StaticGrid | None = None,
+    y_slice: slice = slice(None),
+    x_slice: slice = slice(None),
+) -> LatentHeatDiagnostic:
+    """Choose stored or reconstructed LH using XTIME and stored-flux content."""
+    selected = np.asarray(mask, dtype=bool)
+    if selected.ndim != 2 or not np.any(selected):
+        raise ValueError("LH mask must be a nonempty 2-D array")
+    xtime = read_xtime_minutes(ds)
+    initial_time = bool(np.isclose(xtime, 0.0))
+    lh, qfx = _stored_flux_on_mask(ds, selected, y_slice, x_slice)
+    lh_zero = lh is None or np.allclose(lh, 0.0, rtol=0.0, atol=1.0e-6)
+    qfx_zero = qfx is None or np.allclose(qfx, 0.0, rtol=0.0, atol=1.0e-12)
+
+    if initial_time and lh_zero and qfx_zero:
+        state, _, _, _ = read_surface_state(
+            ds,
+            use_ocean_sst,
+            static_grid=static_grid,
+            y_slice=y_slice,
+            x_slice=x_slice,
+        )
+        selected_state = select_surface_state(state, selected)
+        flux = revised_mm5_ocean_flux(
+            selected_state,
+            SfclayOptions(isftcflx=_physics_attribute(ds, "ISFTCFLX")),
+        )
+        values = np.asarray(flux.lh, dtype=float).reshape(-1)
+        if not np.isfinite(values).all():
+            raise ValueError("reconstructed LH contains nonfinite selected values")
+        return LatentHeatDiagnostic(
+            float(values.mean()),
+            int(values.size),
+            xtime,
+            "reconstructed_initial",
+            False,
+        )
+
+    if not initial_time and lh is None and qfx is None:
+        raise KeyError("XTIME > 0 requires stored LH or QFX")
+
+    if lh is not None and not lh_zero:
+        if qfx is not None and not qfx_zero and not np.allclose(
+            lh,
+            XLV_J_KG * qfx,
             rtol=1.0e-3,
             atol=0.1,
         ):
-            max_difference = float(
-                np.max(np.abs(lh[selected] - XLV_J_KG * qfx[selected]))
-            )
+            max_difference = float(np.max(np.abs(lh - XLV_J_KG * qfx)))
             warnings.warn(
-                "stored NR LH differs from XLV * QFX over the selected region; "
+                "stored LH differs from XLV * QFX over the selected region; "
                 f"using LH (maximum absolute difference {max_difference:.6g} W m-2)",
                 RuntimeWarning,
                 stacklevel=2,
             )
-        return float(lh[selected].mean()), "LH"
-    assert qfx is not None
-    return float((XLV_J_KG * qfx[selected]).mean()), "QFX"
+        values = lh
+        source = "stored_LH"
+    elif qfx is not None and not qfx_zero:
+        if lh is not None:
+            warnings.warn(
+                "stored LH is zero while stored QFX is nonzero; using XLV * QFX",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        values = XLV_J_KG * qfx
+        source = "derived_QFX"
+    else:
+        # This branch is only reachable for an integrated output because an
+        # initial output with empty/zero stored fields was reconstructed above.
+        warnings.warn(
+            "XTIME > 0 but all available stored latent-heat flux fields are zero; "
+            "preserving the stored zero instead of reconstructing",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        if lh is not None:
+            values = lh
+            source = "stored_LH"
+        else:
+            assert qfx is not None
+            values = XLV_J_KG * qfx
+            source = "derived_QFX"
+
+    return LatentHeatDiagnostic(
+        float(values.mean()),
+        int(values.size),
+        xtime,
+        source,
+        True,
+    )
 
 
 def calculate_nr_reference(
@@ -814,8 +911,13 @@ def calculate_nr_reference(
         )
         y_slice, x_slice = mask_bounding_slices(mask)
         local_mask = mask[y_slice, x_slice]
-        lh_mean, lh_source = read_stored_nr_lh(
-            ds, local_mask, y_slice=y_slice, x_slice=x_slice
+        lh_diagnostic = diagnose_lh_on_mask(
+            ds,
+            local_mask,
+            use_ocean_sst=True,
+            static_grid=static_grid,
+            y_slice=y_slice,
+            x_slice=x_slice,
         )
         selected_rows, selected_columns = np.where(local_mask)
         temperature_c, depth_m = read_ohc_inputs(
@@ -843,9 +945,11 @@ def calculate_nr_reference(
                 "center_lon": center_lon,
                 "radius_km": config.radius_km,
                 "tc_ocean_points": int(mask.sum()),
-                "lh_source": lh_source,
-                "lh_mean_w_m2": lh_mean,
-                "lh_finite_points": int(mask.sum()),
+                "xtime_minutes": lh_diagnostic.xtime_minutes,
+                "lh_source": lh_diagnostic.source,
+                "stored_flux_used": lh_diagnostic.stored_flux_used,
+                "lh_mean_w_m2": lh_diagnostic.mean_w_m2,
+                "lh_finite_points": lh_diagnostic.finite_points,
                 "ohc26_mean_j_m2": ohc_j_m2,
                 "ohc26_mean_kj_cm2": ohc_j_m2 / 1.0e7,
                 "ohc_finite_points": ohc_points,
@@ -892,21 +996,15 @@ def calculate_member_records(
                     mask = mask_cache[grid_signature]
                     y_slice, x_slice = mask_bounding_slices(mask)
                     local_mask = mask[y_slice, x_slice]
-                    state, _, _, _ = read_surface_state(
+                    lh_diagnostic = diagnose_lh_on_mask(
                         ds,
-                        experiment.ocean_enabled,
+                        local_mask,
+                        use_ocean_sst=experiment.ocean_enabled,
                         static_grid=static_grid,
                         y_slice=y_slice,
                         x_slice=x_slice,
                     )
-                    selected_state = select_surface_state(state, local_mask)
-                    isftcflx = _physics_attribute(ds, "ISFTCFLX")
-                    flux = revised_mm5_ocean_flux(
-                        selected_state, SfclayOptions(isftcflx=isftcflx)
-                    )
-                    lh_values = flux.lh.ravel()
-                    if not np.isfinite(lh_values).all():
-                        raise ValueError(f"nonfinite LH in selected region: {member_path}")
+                    isftcflx = _physics_attribute(ds, "ISFTCFLX", default=-1)
                     common = {
                         "experiment": experiment.name,
                         "experiment_label": experiment.label,
@@ -917,15 +1015,19 @@ def calculate_member_records(
                         "center_lon": center_lon,
                         "center_slp_hpa": center_slp,
                         "tc_ocean_points": int(mask.sum()),
-                        "sf_sfclay_physics": 1,
+                        "sf_sfclay_physics": _physics_attribute(
+                            ds, "SF_SFCLAY_PHYSICS", default=-1
+                        ),
                         "isftcflx": isftcflx,
-                        "stored_flux_used": False,
+                        "xtime_minutes": lh_diagnostic.xtime_minutes,
+                        "lh_source": lh_diagnostic.source,
+                        "stored_flux_used": lh_diagnostic.stored_flux_used,
                     }
                     lh_records.append(
                         {
                             **common,
-                            "lh_mean_w_m2": float(lh_values.mean()),
-                            "lh_finite_points": int(np.isfinite(lh_values).sum()),
+                            "lh_mean_w_m2": lh_diagnostic.mean_w_m2,
+                            "lh_finite_points": lh_diagnostic.finite_points,
                         }
                     )
                     if experiment.ocean_enabled:
@@ -938,7 +1040,6 @@ def calculate_member_records(
                             ds,
                             y_slice=y_slice,
                             x_slice=x_slice,
-                            surface_temperature_k=state.surface_temperature_k,
                             depth_reference_index=depth_reference_index,
                         )
                         ohc_j_m2, finite_points = _ohc_on_mask(
@@ -1017,12 +1118,42 @@ def _validate_cache_columns(
             raise ValueError(f"cache CSV {path} has nonfinite {column} values")
 
 
+_LH_SOURCES = {"reconstructed_initial", "stored_LH", "derived_QFX"}
+
+
+def _validate_flux_audit_columns(frame: pd.DataFrame, path: Path) -> None:
+    required = {"xtime_minutes", "lh_source", "stored_flux_used"}
+    _validate_cache_columns(frame, path, required, {"xtime_minutes"})
+    invalid_sources = sorted(set(frame["lh_source"].astype(str)) - _LH_SOURCES)
+    if invalid_sources:
+        raise ValueError(
+            f"cache CSV {path} has invalid lh_source values: {invalid_sources}"
+        )
+    normalized = []
+    for value in frame["stored_flux_used"]:
+        if isinstance(value, (bool, np.bool_)):
+            normalized.append(bool(value))
+        elif str(value).strip().lower() in {"true", "false"}:
+            normalized.append(str(value).strip().lower() == "true")
+        else:
+            raise ValueError(
+                f"cache CSV {path} has invalid stored_flux_used value: {value!r}"
+            )
+    frame["stored_flux_used"] = normalized
+    expected = frame["lh_source"].astype(str) != "reconstructed_initial"
+    if not np.array_equal(frame["stored_flux_used"].to_numpy(dtype=bool), expected):
+        raise ValueError(
+            f"cache CSV {path} has inconsistent lh_source/stored_flux_used values"
+        )
+
+
 def load_nr_cache(config: Config) -> pd.DataFrame:
     """Read and validate the one-row NR LH/OHC reference cache."""
     path = config.output_dir / "initial_tc150_nr_reference.csv"
     frame = _read_cache_csv(path)
     required = {"lh_mean_w_m2", "ohc26_mean_kj_cm2"}
     _validate_cache_columns(frame, path, required, required)
+    _validate_flux_audit_columns(frame, path)
     if len(frame) != 1:
         raise ValueError(f"NR cache CSV must contain exactly one row: {path}")
     print(f"Reading cached NR reference: {path}")
@@ -1043,6 +1174,7 @@ def _validate_member_cache(
     }
     numeric = {value_column, "ensemble_mean", "ensemble_std"}
     _validate_cache_columns(frame, path, required, numeric)
+    _validate_flux_audit_columns(frame, path)
     if frame.duplicated(_CACHE_KEY_COLUMNS).any():
         raise ValueError(f"cache CSV contains duplicate member keys: {path}")
     actual_keys = set(frame[_CACHE_KEY_COLUMNS].itertuples(index=False, name=None))

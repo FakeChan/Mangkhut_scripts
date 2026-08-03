@@ -233,29 +233,111 @@ def synthetic_member_dataset(include_ocean: bool = True) -> xr.Dataset:
 
 
 class WrfReaderAndWorkflowTests(unittest.TestCase):
-    def test_nr_lh_prefers_stored_lh_when_qfx_disagrees(self):
+    def test_initial_zero_stored_flux_is_reconstructed(self):
         ds = synthetic_member_dataset(include_ocean=True)
-        ds["LH"][:] = np.array([[[100.0, 110.0, 120.0], [130.0, 140.0, 150.0]]])
-        ds["QFX"][:] = 1.0e-3
         mask = np.array([[True, True, False], [False, False, False]])
 
-        with self.assertWarnsRegex(RuntimeWarning, "LH.*QFX"):
-            value, source = diag.read_stored_nr_lh(ds, mask)
+        result = diag.diagnose_lh_on_mask(ds, mask, use_ocean_sst=True)
 
-        self.assertEqual(source, "LH")
-        self.assertAlmostEqual(value, 105.0)
+        self.assertEqual(result.source, "reconstructed_initial")
+        self.assertFalse(result.stored_flux_used)
+        self.assertEqual(result.xtime_minutes, 0.0)
+        self.assertGreater(result.mean_w_m2, 0.0)
+        self.assertEqual(result.finite_points, 2)
 
-    def test_nr_lh_falls_back_to_qfx_when_lh_is_missing(self):
-        ds = synthetic_member_dataset(include_ocean=True).drop_vars("LH")
+    def test_initial_nonzero_lh_uses_stored_lh(self):
+        ds = synthetic_member_dataset(include_ocean=True)
+        ds["LH"][:] = np.array([[[100.0, 110.0, 120.0], [130.0, 140.0, 150.0]]])
+        mask = np.array([[True, True, False], [False, False, False]])
+
+        result = diag.diagnose_lh_on_mask(ds, mask, use_ocean_sst=True)
+
+        self.assertEqual(result.source, "stored_LH")
+        self.assertTrue(result.stored_flux_used)
+        self.assertAlmostEqual(result.mean_w_m2, 105.0)
+
+    def test_initial_nonzero_qfx_overrides_zero_lh(self):
+        ds = synthetic_member_dataset(include_ocean=True)
         ds["QFX"][:] = np.array(
             [[[4.0e-5, 8.0e-5, 0.0], [0.0, 0.0, 0.0]]]
         )
         mask = np.array([[True, True, False], [False, False, False]])
 
-        value, source = diag.read_stored_nr_lh(ds, mask)
+        with self.assertWarnsRegex(RuntimeWarning, "LH.*zero.*QFX.*nonzero"):
+            result = diag.diagnose_lh_on_mask(ds, mask, use_ocean_sst=True)
 
-        self.assertEqual(source, "QFX")
-        self.assertAlmostEqual(value, 150.0)
+        self.assertEqual(result.source, "derived_QFX")
+        self.assertTrue(result.stored_flux_used)
+        self.assertAlmostEqual(result.mean_w_m2, 150.0)
+
+    def test_integrated_output_uses_stored_lh(self):
+        ds = synthetic_member_dataset(include_ocean=True)
+        ds["XTIME"][:] = 5.0
+        ds["LH"][:] = 175.0
+        ds["QFX"][:] = 175.0 / diag.XLV_J_KG
+        mask = np.ones((2, 3), dtype=bool)
+
+        result = diag.diagnose_lh_on_mask(ds, mask, use_ocean_sst=True)
+
+        self.assertEqual(result.source, "stored_LH")
+        self.assertTrue(result.stored_flux_used)
+        self.assertEqual(result.xtime_minutes, 5.0)
+        self.assertAlmostEqual(result.mean_w_m2, 175.0)
+
+    def test_integrated_output_falls_back_to_qfx(self):
+        ds = synthetic_member_dataset(include_ocean=True).drop_vars("LH")
+        ds["XTIME"][:] = 5.0
+        ds["QFX"][:] = 4.0e-5
+        mask = np.ones((2, 3), dtype=bool)
+
+        result = diag.diagnose_lh_on_mask(ds, mask, use_ocean_sst=True)
+
+        self.assertEqual(result.source, "derived_QFX")
+        self.assertAlmostEqual(result.mean_w_m2, 100.0)
+
+    def test_integrated_zero_flux_is_preserved_with_warning(self):
+        ds = synthetic_member_dataset(include_ocean=True)
+        ds["XTIME"][:] = 5.0
+        mask = np.ones((2, 3), dtype=bool)
+
+        with self.assertWarnsRegex(RuntimeWarning, "XTIME > 0.*zero"):
+            result = diag.diagnose_lh_on_mask(ds, mask, use_ocean_sst=True)
+
+        self.assertEqual(result.source, "stored_LH")
+        self.assertTrue(result.stored_flux_used)
+        self.assertEqual(result.mean_w_m2, 0.0)
+
+    def test_integrated_output_requires_stored_flux(self):
+        ds = synthetic_member_dataset(include_ocean=True).drop_vars(["LH", "QFX"])
+        ds["XTIME"][:] = 5.0
+        mask = np.ones((2, 3), dtype=bool)
+
+        with self.assertRaisesRegex(KeyError, "XTIME > 0.*LH or QFX"):
+            diag.diagnose_lh_on_mask(ds, mask, use_ocean_sst=True)
+
+    def test_lh_diagnosis_requires_one_finite_xtime(self):
+        mask = np.ones((2, 3), dtype=bool)
+        for ds in (
+            synthetic_member_dataset(include_ocean=True).drop_vars("XTIME"),
+            synthetic_member_dataset(include_ocean=True).assign(
+                XTIME=(("Time",), [np.nan])
+            ),
+        ):
+            with self.subTest(variables=tuple(ds.data_vars)):
+                with self.assertRaisesRegex((KeyError, ValueError), "XTIME"):
+                    diag.diagnose_lh_on_mask(ds, mask, use_ocean_sst=True)
+
+    def test_stored_lh_warns_when_nonzero_qfx_disagrees(self):
+        ds = synthetic_member_dataset(include_ocean=True)
+        ds["LH"][:] = 100.0
+        ds["QFX"][:] = 1.0e-3
+        mask = np.ones((2, 3), dtype=bool)
+
+        with self.assertWarnsRegex(RuntimeWarning, "LH.*QFX"):
+            result = diag.diagnose_lh_on_mask(ds, mask, use_ocean_sst=True)
+
+        self.assertEqual(result.source, "stored_LH")
+        self.assertAlmostEqual(result.mean_w_m2, 100.0)
 
     def test_nr_reference_uses_nr_native_mask_for_lh_and_ohc(self):
         with TemporaryDirectory() as tmp:
@@ -283,7 +365,9 @@ class WrfReaderAndWorkflowTests(unittest.TestCase):
         self.assertEqual(len(reference), 1)
         row = reference.iloc[0]
         self.assertEqual(row["input_path"], str(nr_path))
-        self.assertEqual(row["lh_source"], "LH")
+        self.assertEqual(row["lh_source"], "stored_LH")
+        self.assertTrue(row["stored_flux_used"])
+        self.assertEqual(row["xtime_minutes"], 0.0)
         self.assertEqual(row["tc_ocean_points"], 6)
         self.assertEqual(row["lh_finite_points"], 6)
         self.assertEqual(row["ohc_finite_points"], 6)
@@ -640,6 +724,8 @@ class WrfReaderAndWorkflowTests(unittest.TestCase):
         self.assertEqual(len(lh), 4)
         self.assertEqual(len(ohc), 2)
         self.assertTrue((lh["stored_flux_used"] == False).all())  # noqa: E712
+        self.assertTrue((lh["lh_source"] == "reconstructed_initial").all())
+        self.assertTrue((lh["xtime_minutes"] == 0.0).all())
 
 
 def cached_member_frames(config: diag.Config) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -655,6 +741,9 @@ def cached_member_frames(config: diag.Config) -> tuple[pd.DataFrame, pd.DataFram
                     "member": member,
                     "ensemble_mean": 125.0,
                     "ensemble_std": 5.0,
+                    "xtime_minutes": 0.0,
+                    "lh_source": "reconstructed_initial",
+                    "stored_flux_used": False,
                 }
                 lh_rows.append({**common, "lh_mean_w_m2": 125.0})
                 if experiment.ocean_enabled:
@@ -679,7 +768,13 @@ class CacheInputTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             config = self.cache_config(Path(tmp))
             expected = pd.DataFrame(
-                {"lh_mean_w_m2": [175.0], "ohc26_mean_kj_cm2": [90.0]}
+                {
+                    "lh_mean_w_m2": [175.0],
+                    "ohc26_mean_kj_cm2": [90.0],
+                    "xtime_minutes": [5.0],
+                    "lh_source": ["stored_LH"],
+                    "stored_flux_used": [True],
+                }
             )
             expected.to_csv(
                 config.output_dir / "initial_tc150_nr_reference.csv", index=False
@@ -734,6 +829,17 @@ class CacheInputTests(unittest.TestCase):
             ohc.to_csv(config.output_dir / "initial_tc150_ohc_members.csv", index=False)
 
             with self.assertRaisesRegex(ValueError, "nonfinite"):
+                diag.load_member_cache(config)
+
+    def test_load_member_cache_requires_flux_source_audit_columns(self):
+        with TemporaryDirectory() as tmp:
+            config = self.cache_config(Path(tmp))
+            lh, ohc = cached_member_frames(config)
+            lh = lh.drop(columns="lh_source")
+            lh.to_csv(config.output_dir / "initial_tc150_lh_members.csv", index=False)
+            ohc.to_csv(config.output_dir / "initial_tc150_ohc_members.csv", index=False)
+
+            with self.assertRaisesRegex(ValueError, "lh_source"):
                 diag.load_member_cache(config)
 
     def test_load_member_cache_rejects_incomplete_configured_coverage(self):
