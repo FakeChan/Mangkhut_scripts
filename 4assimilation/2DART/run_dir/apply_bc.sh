@@ -6,16 +6,14 @@
 #     delta = bc_fg_d0X.ensmean - firstguess_d0X.ensmean   (整场逐网格点)
 #     member.OM_TMP = member.OM_TMP + delta                (整场相加, 广播机制)
 #
-# 订正管线 (每个成员):
-#   1. ncdiff  计算 delta 场 (仅 OM_TMP)
-#   2. ncrename delta 变量改名 OM_TMP_delta (避免与成员变量重名)
-#   3. python  将 delta 的缺失值清零 (陆地 _FillValue 不污染成员)
-#   4. ncks -A 把 OM_TMP_delta 追加进成员文件 (netCDF3 仅追加, 便宜)
-#   5. ncap2   OM_TMP = OM_TMP + OM_TMP_delta (其余变量原样保留)
-#   6. ncks -x 剔除临时变量 OM_TMP_delta, 覆盖回成员文件名
+# 订正管线:
+#   1. ncdiff 计算 delta 场 (仅 OM_TMP)
+#   2. python 就地订正每个成员: 读 delta 与成员 OM_TMP, 相加后写回
+#      (netCDF4 r+ 只读写 OM_TMP 一个变量, 不重写整个文件;
+#       delta 的缺失值在内存中清零, 陆地 _FillValue 不污染成员)
 #
-# 依赖 NCO (ncdiff / ncrename / ncks / ncap2 / ncdump) 与 python3(netCDF4)。
-# 注意: ncbo 输出只含公共变量, 会丢弃成员的其他变量, 故不用 ncbo 做加法。
+# 依赖 NCO (ncdiff / ncks / ncdump) 与 python3(netCDF4)。
+# 可选环境变量 NPROC: 并行订正成员数 (默认 1), 内存需能容纳 NPROC 个 OM_TMP 全场。
 #
 # 用法:
 #   ./apply_bc.sh
@@ -47,6 +45,9 @@ VAR=OM_TMP
 # 预期垂直层数 (仅作检查提示，不强制终止)
 NLEV_EXPECT=30
 
+# 并行订正成员数 (可选, 默认串行; 内存需能容纳 NPROC 个 OM_TMP 全场)
+NPROC="${NPROC:-1}"
+
 # ==============================================================================
 # 2. 功能函数
 # ==============================================================================
@@ -58,7 +59,7 @@ die() {
 
 # 检查 NCO 工具与 python3 是否可用
 check_tools() {
-    for t in ncdiff ncrename ncks ncap2 ncdump; do
+    for t in ncdiff ncks ncdump; do
         command -v "$t" >/dev/null 2>&1 || die "缺少 NCO 工具: $t (请先加载 nco 环境)"
     done
     command -v python3 >/dev/null 2>&1 || die "缺少 python3 (delta 缺失值清零需要, 含 netCDF4 模块)"
@@ -70,7 +71,7 @@ check_tools() {
 # ==============================================================================
 
 echo "================================================"
-echo "WRF OM_TMP Bias Correction Tool (ncap2 pipeline)"
+echo "WRF OM_TMP Bias Correction Tool (in-place, NPROC=${NPROC})"
 echo "================================================"
 echo "源目录:    $SRC_DIR"
 echo "工作目录:  $WORK_DIR"
@@ -120,35 +121,27 @@ done
 # --- Step 3: 逐 domain 计算 delta 并订正 ---
 echo ""
 echo "Step 3: 计算 delta 并订正成员"
+# 就地订正小脚本: 只读写 OM_TMP 一个变量 (netCDF4 r+, 不重写整个文件);
+# delta 的缺失值在内存中清零, 陆地 _FillValue 不污染成员
+cat > "$WORK_DIR/deltas/bc_add.py" <<'PYEOF'
+import sys
+import netCDF4
+import numpy as np
+
+member, delta_file, var = sys.argv[1], sys.argv[2], sys.argv[3]
+with netCDF4.Dataset(delta_file) as nd:
+    delta = np.ma.filled(nd.variables[var][:], 0.0)
+with netCDF4.Dataset(member, 'r+') as nm:
+    v = nm.variables[var]
+    v[:] = v[:] + delta
+PYEOF
+
 for dom in "${DOMAINS[@]}"; do
     delta_file="$WORK_DIR/deltas/delta_${dom}.nc"
     echo "  [$dom] 计算 delta = bc_fg_${dom}.ensmean - firstguess_${dom}.ensmean ..."
     ncdiff -v "$VAR" "$SRC_DIR/bc_fg_${dom}.ensmean" \
            "$SRC_DIR/firstguess_${dom}.ensmean" "$delta_file" \
         || die "[$dom] ncdiff 失败"
-    ncrename -v "$VAR,${VAR}_delta" "$delta_file" \
-        || die "[$dom] ncrename 失败"
-
-    # delta 缺失值清零: 若 ensmean 在陆地格点为 _FillValue, delta 在陆地也为缺失,
-    # 直接相加会把成员的陆地值污染成缺失。NCO 的 mask_miss/delete_miss 行为不可靠,
-    # 用 python 一步完成 (netCDF4 集群已有)。
-    python3 - "$delta_file" "$dom" "$VAR" <<'EOF' || die "[$dom] delta 缺失值清零失败"
-import sys
-import netCDF4
-import numpy as np
-
-f, dom, var = sys.argv[1], sys.argv[2], sys.argv[3]
-vname = var + "_delta"
-with netCDF4.Dataset(f, 'r+') as nc:
-    v = nc.variables[vname]
-    d = v[:]
-    n = int(np.ma.getmaskarray(d).sum())
-    if n > 0:
-        v[:] = np.ma.filled(d, 0.0)
-        if '_FillValue' in v.ncattrs():
-            v.delncattr('_FillValue')
-    print(f"  [{dom}] delta 缺失值清零: {n} 个点")
-EOF
 
     # 层数检查 (仅提示)
     nlev=$(ncdump -h "$delta_file" | grep -o 'bottom_top = [0-9]*' | grep -o '[0-9]*$')
@@ -159,34 +152,42 @@ EOF
     fi
 
     ok=0; fail=0
-    for f in "$WORK_DIR"/firstguess_${dom}.mem*; do
-        [ -e "$f" ] || continue
-
-        # 第一个成员: 抽查订正前值 (便于人工核对)
-        if [ "$ok" -eq 0 ] && [ "$fail" -eq 0 ]; then
-            echo "    [Check] 订正前 $f :"
-            ncks -H -C -s '%10.4f ' -v "$VAR" -d bottom_top,0 -d south_north,1 -d west_east,1 "$f" 2>/dev/null | head -3
+    if [ "$NPROC" -gt 1 ]; then
+        # 并行模式: xargs -P, 不打印逐成员 [Check]
+        members=()
+        for f in "$WORK_DIR"/firstguess_${dom}.mem*; do
+            [ -e "$f" ] || continue
+            members+=("$f")
+        done
+        if printf '%s\n' "${members[@]}" | xargs -P "$NPROC" -I{} \
+            python3 "$WORK_DIR/deltas/bc_add.py" "{}" "$delta_file" "$VAR"; then
+            ok=${#members[@]}
+        else
+            fail=${#members[@]}   # xargs 任一分进程失败会返回非零, 此处保守记为全失败
         fi
+    else
+        for f in "$WORK_DIR"/firstguess_${dom}.mem*; do
+            [ -e "$f" ] || continue
 
-        # 1) ncks -A: 把 OM_TMP_delta 追加进成员 (仅 header+EOF, 不重写全文件)
-        # 2) ncap2:  整场相加, 成员其余变量原样保留
-        # 3) ncks -x: 剔除临时变量 OM_TMP_delta, 输出直接覆盖回成员文件名
-        if ncks -A -v "${VAR}_delta" "$delta_file" "$f" \
-            && ncap2 -O -s "$VAR=${VAR}+${VAR}_delta" "$f" "$f.step.nc" \
-            && ncks -O -x -v "${VAR}_delta" "$f.step.nc" "$f" \
-            && rm -f "$f.step.nc"; then
-            ok=$((ok + 1))
-            # 第一个成员: 抽查订正后值
-            if [ "$ok" -eq 1 ] && [ "$fail" -eq 0 ]; then
-                echo "    [Check] 订正后 $f :"
+            # 第一个成员: 抽查订正前值 (便于人工核对)
+            if [ "$ok" -eq 0 ] && [ "$fail" -eq 0 ]; then
+                echo "    [Check] 订正前 $f :"
                 ncks -H -C -s '%10.4f ' -v "$VAR" -d bottom_top,0 -d south_north,1 -d west_east,1 "$f" 2>/dev/null | head -3
             fi
-        else
-            fail=$((fail + 1))
-            echo "    [Warn] 订正失败: $f"
-            rm -f "$f.step.nc"
-        fi
-    done
+
+            if python3 "$WORK_DIR/deltas/bc_add.py" "$f" "$delta_file" "$VAR"; then
+                ok=$((ok + 1))
+                # 第一个成员: 抽查订正后值
+                if [ "$ok" -eq 1 ] && [ "$fail" -eq 0 ]; then
+                    echo "    [Check] 订正后 $f :"
+                    ncks -H -C -s '%10.4f ' -v "$VAR" -d bottom_top,0 -d south_north,1 -d west_east,1 "$f" 2>/dev/null | head -3
+                fi
+            else
+                fail=$((fail + 1))
+                echo "    [Warn] 订正失败: $f"
+            fi
+        done
+    fi
     echo "  [$dom] 订正完成: 成功 $ok / 失败 $fail"
 done
 
