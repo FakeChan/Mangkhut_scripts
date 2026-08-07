@@ -139,7 +139,8 @@ PYEOF
 for dom in "${DOMAINS[@]}"; do
     delta_file="$WORK_DIR/deltas/delta_${dom}.nc"
     echo "  [$dom] 计算 delta = bc_fg_${dom}.ensmean - firstguess_${dom}.ensmean ..."
-    ncdiff -v "$VAR" "$SRC_DIR/bc_fg_${dom}.ensmean" \
+    # -O: 允许覆盖上次运行遗留的 delta 文件
+    ncdiff -O -v "$VAR" "$SRC_DIR/bc_fg_${dom}.ensmean" \
            "$SRC_DIR/firstguess_${dom}.ensmean" "$delta_file" \
         || die "[$dom] ncdiff 失败"
 
