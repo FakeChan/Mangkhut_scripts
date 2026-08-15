@@ -10,6 +10,6 @@
 if [ $rttov_scatt -eq 1 ];then
     running_script_file=wrf_rttov_d01_75km_ens_rttov_scatt.m
 else
-    running_script_file=wrf_rttov_d01_75km_ens.m
+    running_script_file=wrf_rttov_d02_75km_ens_interp.m
 fi
 matlab -nodesktop -nosplash -nodisplay <  ${running_script_file}
