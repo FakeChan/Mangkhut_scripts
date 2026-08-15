@@ -23,6 +23,11 @@ function [xloc, yloc] = latlon_to_fractional_ij(xlat, xlon, obs_lat, obs_lon)
 %       xloc, yloc : continuous grid coordinates, same order and shape as
 %                    the input observation locations
 
+% WRF XLAT/XLONG are commonly stored as NetCDF float and therefore read as
+% MATLAB single arrays. scatteredInterpolant requires double input points.
+xlat = double(xlat);
+xlon = double(xlon);
+
 [ny, nx] = size(xlat);
 if ~isequal(size(xlon), [ny nx])
     error('XLAT and XLONG must have identical 2-D sizes, got %s and %s.', ...
