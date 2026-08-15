@@ -35,6 +35,8 @@ export use_total_ice=0
 export profile_matlab_flag=${profile_matlab_flag:-1}
 export lacc_mode=1
 
+lacc_skip_rttov=1  #skip rttov and matlab if no more time need to be calculated
+
 if [ ! -z "${cycle_flag}" ]; then
 	export lacc_center_day=${lacc_center_day:-$current_day}
 	export lacc_center_hour=${lacc_center_hour:-$current_hour}
@@ -53,7 +55,7 @@ build_lacc_times() {
 	local times=""
 	local lag lag_day lag_hour
 
-	for lag in ${LACC_LAG_HOURS:-3 6 9};do
+	for lag in ${LACC_LAG_HOURS:-0 3 6};do
 		lag_day=${center_day_num}
 		lag_hour=$((center_hour_num - lag))
 		while (( lag_hour < 0 ));do
@@ -121,36 +123,43 @@ for imem in ${memlist[*]};do
 	export prof_mem_dir=${prof_dir}/${member}/
 	export obs_mem_dir=${obs_dir}/${member}/
 	mkdir -p ${ens_mem_dir} ${prof_mem_dir} ${obs_mem_dir}
-
+    
+	
 	for lacc_time in ${lacc_times};do
 		export obs_day=${lacc_time%%_*}
 		_lacc_hm=${lacc_time#*_}
 		export obs_hour=${_lacc_hm%%_*}
 		export obs_min=${_lacc_hm##*_}
 		export time=${obs_day}_${obs_hour}_${obs_min}
+		if [[ "$lacc_skip_rttov" -eq 1 ]];then
+			echo "======================================================"
+			echo "skip rttov and matlab"
+			echo "======================================================"
+			continue
+		else
+			echo "======================================================"
+			echo "LACC ens ${member} lag time: ${time}; center fixed at ${lacc_center_time}"
+			echo "the ensemble comes from ${ens_mem_dir}"
+			echo "======================================================"
 
-		echo "======================================================"
-		echo "LACC ens ${member} lag time: ${time}; center fixed at ${lacc_center_time}"
-		echo "the ensemble comes from ${ens_mem_dir}"
-		echo "======================================================"
+			cd ${run_matlab_dir}/2ens_matlab
+			./${domain}_run_matlab.sh
+			echo "profile done"
 
-		cd ${run_matlab_dir}/2ens_matlab
-		./${domain}_run_matlab.sh
-		echo "profile done"
+			ln -sf ${rtcoef_dir}/${rtcoef} ${work_dir}/2call_rttov/call_rttov_test
+			if [[ ! -z "${MIETABLE}" ]]; then
+				ln -sf ${MIETABLE_DIR}/${MIETABLE} ${work_dir}/2call_rttov/call_rttov_test
+			fi
+			bash ${work_dir}/2call_rttov/${domain}_call_rttov.sh
+			echo "rttov done"
 
-		ln -sf ${rtcoef_dir}/${rtcoef} ${work_dir}/2call_rttov/call_rttov_test
-		if [[ ! -z "${MIETABLE}" ]]; then
-			ln -sf ${MIETABLE_DIR}/${MIETABLE} ${work_dir}/2call_rttov/call_rttov_test
+			mkdir -p ${obs_mem_dir}/${instrument}/BT_${time}
+			cd ${merge_dir}
+			matlab -nodesktop -nosplash -nodisplay < hebing_diffchan.m
+			echo "merge done"
 		fi
-		bash ${work_dir}/2call_rttov/${domain}_call_rttov.sh
-		echo "rttov done"
-
-		mkdir -p ${obs_mem_dir}/${instrument}/BT_${time}
-		cd ${merge_dir}
-		matlab -nodesktop -nosplash -nodisplay < hebing_diffchan.m
-		echo "merge done"
 	done
-
+	
 	cd ${merge_dir}
 	matlab -nodesktop -nosplash -nodisplay < average_LACC_ens.m
 	echo "LACC ens average done: ${obs_mem_dir}/${instrument}/BT_LACC_${lacc_center_time}"

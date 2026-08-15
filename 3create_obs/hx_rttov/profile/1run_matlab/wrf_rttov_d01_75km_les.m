@@ -37,8 +37,8 @@ if strcmp(lacc_mode,'1')
     wrf_domain='d02';
     delta_x=1500;
 else
-    wrf_domain='d03';
-    delta_x=300;
+    wrf_domain='d02';
+    delta_x=1500;
 end
 wrf_fname = ['wrfout_' wrf_domain '_2018-09-' time ':00'];
 center_wrf_fname = ['wrfout_' wrf_domain '_2018-09-' center_time ':00'];
