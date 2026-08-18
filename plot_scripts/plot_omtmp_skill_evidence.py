@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
 
 import matplotlib
 
@@ -13,13 +17,27 @@ from matplotlib.transforms import Bbox
 import numpy as np
 import pandas as pd
 
+from omtmp_evidence_cache import (
+    FORECAST_BASE_DIR as DEFAULT_FORECAST_BASE_DIR,
+    METHODS as DEFAULT_METHODS,
+    NR_DIR as DEFAULT_NR_DIR,
+    STRONG_EXPERIMENT as DEFAULT_STRONG_EXPERIMENT,
+    WEAK_EXPERIMENT as DEFAULT_WEAK_EXPERIMENT,
+    ensure_skill_cache,
+    paired_case_count,
+)
+
 
 # =====================
 # User configuration
 # =====================
-PROJECT_DIR = Path(__file__).resolve().parents[2]
-CACHE_DIR = PROJECT_DIR / "tmp" / "omtmp_skill_cache"
-OUTPUT_STEM = PROJECT_DIR / "Mangkhut_scripts" / "plot_scripts" / "figs" / "omtmp_skill_evidence"
+SCRIPT_DIR = Path(__file__).resolve().parent
+LOCAL_PROJECT_DIR = SCRIPT_DIR.parents[1] if SCRIPT_DIR.parent.name == "Mangkhut_scripts" else SCRIPT_DIR.parent
+DEFAULT_CACHE_DIR = LOCAL_PROJECT_DIR / "tmp" / "omtmp_skill_cache"
+if not DEFAULT_CACHE_DIR.exists():
+    DEFAULT_CACHE_DIR = SCRIPT_DIR / "omtmp_skill_cache"
+CACHE_DIR = Path(os.environ.get("OMTMP_CACHE_DIR", DEFAULT_CACHE_DIR))
+OUTPUT_STEM = SCRIPT_DIR / "figs" / "omtmp_skill_evidence"
 PANEL_OUTPUT_DIR = OUTPUT_STEM.parent / f"{OUTPUT_STEM.name}_panels"
 OUTPUT_STEM.parent.mkdir(parents=True, exist_ok=True)  # ensure figs/ exists before savefig
 EXPORT_FORMAT = "png"  # single export format for the full figure and panels: "png", "svg", or "pdf"
@@ -29,6 +47,13 @@ PNG_DPI = 400
 BOOTSTRAP_SAMPLES = 20_000
 RANDOM_SEED = 20260804
 EARLY_TIMES = (0.5, 1.0, 1.5, 2.0)
+FORECAST_BASE_DIR = DEFAULT_FORECAST_BASE_DIR
+NR_DIR = DEFAULT_NR_DIR
+STRONG_EXPERIMENT = DEFAULT_STRONG_EXPERIMENT
+WEAK_EXPERIMENT = DEFAULT_WEAK_EXPERIMENT
+METHODS = DEFAULT_METHODS
+MAX_MEMBERS_PER_METHOD = None
+CACHE_POLICY = "auto"  # "auto" builds missing cache; "refresh" rebuilds; "reuse" requires existing cache.
 
 
 # Mandatory editable-text settings.
@@ -374,20 +399,35 @@ def plot_intensity_axis(ax, mean, low, high, title, unit, panel_label=None):
         add_panel_label(ax, panel_label, x=-0.25, y=1.15)
 
 
-def write_caption():
-    text = """# Figure caption
+def write_caption(n_cases):
+    text = f"""# Figure caption
 
-Strong coupling robustly improves the ocean surface and skin temperature, but the atmospheric and tropical-cyclone forecast benefits are strongly attenuated. (a) Paired RMSE ratios during 0.5–2 h over ocean points within 300 km of the NR storm center; points and 95% bootstrap confidence intervals use 12 method/member paired cases after averaging time within case. Values below one favor strong coupling. (b) Time evolution of the ocean and skin-temperature RMSE improvement. (c) Atmospheric and surface-flux improvements on an expanded scale. (d) Early-window vertical profiles of QVAPOR and perturbation-potential-temperature skill. (e) Ocean/skin improvements separated by assimilation method. (f–h) Early-window changes in track, minimum-pressure and maximum-wind absolute errors. Positive improvement is weak-error minus strong-error. NR fields were bilinearly interpolated to the experiment grid; 00:30 and 01:30 NR truth fields were linearly interpolated in time between hourly outputs.
+Strong coupling robustly improves the ocean surface and skin temperature, but the atmospheric and tropical-cyclone forecast benefits are strongly attenuated. (a) Paired RMSE ratios during 0.5–2 h over ocean points within 300 km of the NR storm center; points and 95% bootstrap confidence intervals use {n_cases} method/member paired cases after averaging time within case. Values below one favor strong coupling. (b) Time evolution of the ocean and skin-temperature RMSE improvement. (c) Atmospheric and surface-flux improvements on an expanded scale. (d) Early-window vertical profiles of QVAPOR and perturbation-potential-temperature skill. (e) Ocean/skin improvements separated by assimilation method. (f–h) Early-window changes in track, minimum-pressure and maximum-wind absolute errors. Positive improvement is weak-error minus strong-error. NR fields were bilinearly interpolated to the experiment grid; 00:30 and 01:30 NR truth fields were linearly interpolated in time between hourly outputs.
 """
     (OUTPUT_STEM.parent / f"{OUTPUT_STEM.name}_caption.md").write_text(text, encoding="utf-8")
 
 
 def main():
+    ensure_skill_cache(
+        cache_dir=CACHE_DIR,
+        forecast_base_dir=FORECAST_BASE_DIR,
+        nr_dir=NR_DIR,
+        strong_experiment=STRONG_EXPERIMENT,
+        weak_experiment=WEAK_EXPERIMENT,
+        methods=METHODS,
+        max_members_per_method=MAX_MEMBERS_PER_METHOD,
+        cache_policy=CACHE_POLICY,
+    )
     metrics_raw = pd.read_csv(CACHE_DIR / "omtmp_skill_metrics.csv", dtype={"member": str})
     metrics = selected_metrics(metrics_raw)
     summary = pd.read_csv(CACHE_DIR / "omtmp_skill_summary.csv")
     vertical = pd.read_csv(CACHE_DIR / "omtmp_skill_vertical_summary.csv")
     intensity = pd.read_csv(CACHE_DIR / "omtmp_skill_intensity_summary.csv")
+    members_by_method = {
+        method: tuple(sorted(metrics_raw.loc[metrics_raw.method == method, "member"].astype(str).str.zfill(3).unique()))
+        for method in METHODS
+    }
+    n_cases = paired_case_count(members_by_method)
 
     fig = plt.figure(figsize=FIGURE_SIZE_INCHES, constrained_layout=False)
     grid = fig.add_gridspec(
@@ -460,7 +500,7 @@ def main():
     fig.text(
         0.09,
         0.944,
-        "Positive improvement favors strong coupling; shading/error bars show 95% paired-case bootstrap intervals (n = 12).",
+        f"Positive improvement favors strong coupling; shading/error bars show 95% paired-case bootstrap intervals (n = {n_cases}).",
         ha="left",
         va="top",
         fontsize=6.8,
@@ -485,7 +525,7 @@ def main():
         kwargs["dpi"] = PNG_DPI
     fig.savefig(OUTPUT_STEM.with_suffix(f".{EXPORT_FORMAT}"), bbox_inches="tight", **kwargs)
     plt.close(fig)
-    write_caption()
+    write_caption(n_cases)
     print(f"saved {OUTPUT_STEM}.{EXPORT_FORMAT}")
     print(f"saved individual panels under {PANEL_OUTPUT_DIR}")
 

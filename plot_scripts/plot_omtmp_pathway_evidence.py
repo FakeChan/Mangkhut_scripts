@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
 
 import matplotlib
 
@@ -14,13 +18,28 @@ from matplotlib.transforms import Bbox
 import numpy as np
 import pandas as pd
 
+from omtmp_evidence_cache import (
+    FORECAST_BASE_DIR as DEFAULT_FORECAST_BASE_DIR,
+    METHODS as DEFAULT_METHODS,
+    NR_DIR as DEFAULT_NR_DIR,
+    STRONG_EXPERIMENT as DEFAULT_STRONG_EXPERIMENT,
+    WEAK_EXPERIMENT as DEFAULT_WEAK_EXPERIMENT,
+    ensure_pathway_cache,
+    member_sort_key,
+    paired_case_count,
+)
+
 
 # =====================
 # User configuration
 # =====================
-PROJECT_DIR = Path(__file__).resolve().parents[2]
-CACHE_DIR = PROJECT_DIR / "tmp" / "omtmp_pathway_cache"
-OUTPUT_BASE = PROJECT_DIR / "Mangkhut_scripts" / "plot_scripts" / "figs" / "omtmp_pathway_evidence"
+SCRIPT_DIR = Path(__file__).resolve().parent
+LOCAL_PROJECT_DIR = SCRIPT_DIR.parents[1] if SCRIPT_DIR.parent.name == "Mangkhut_scripts" else SCRIPT_DIR.parent
+DEFAULT_CACHE_DIR = LOCAL_PROJECT_DIR / "tmp" / "omtmp_pathway_cache"
+if not DEFAULT_CACHE_DIR.exists():
+    DEFAULT_CACHE_DIR = SCRIPT_DIR / "omtmp_pathway_cache"
+CACHE_DIR = Path(os.environ.get("OMTMP_CACHE_DIR", DEFAULT_CACHE_DIR))
+OUTPUT_BASE = SCRIPT_DIR / "figs" / "omtmp_pathway_evidence"
 PANEL_OUTPUT_DIR = OUTPUT_BASE.parent / f"{OUTPUT_BASE.name}_panels"
 OUTPUT_BASE.parent.mkdir(parents=True, exist_ok=True)  # ensure figs/ exists before savefig
 EXPORT_FORMAT = "png"  # single export format for the full figure and panels: "png", "svg", or "pdf"
@@ -29,12 +48,18 @@ FIGURE_SIZE_INCH = (7.2, 8.1)
 PNG_DPI = 400
 REGION = "0-150"
 VERTICAL_ANNULUS = 1  # 75–150 km, where the boundary-layer signal is clearest.
-METHODS = ("EAKF", "QCF_RHF")
+FORECAST_BASE_DIR = DEFAULT_FORECAST_BASE_DIR
+NR_DIR = DEFAULT_NR_DIR
+STRONG_EXPERIMENT = DEFAULT_STRONG_EXPERIMENT
+WEAK_EXPERIMENT = DEFAULT_WEAK_EXPERIMENT
+METHODS = DEFAULT_METHODS
 METHOD_LABELS = {"EAKF": "EAKF", "QCF_RHF": "QCF-RHF"}
 METHOD_COLORS = {"EAKF": "#42949E", "QCF_RHF": "#0F4D92"}
 TIMES = np.array([0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
 EARLY_TIMES = np.array([0.5, 1.0, 1.5, 2.0])
 LEVEL_HEIGHTS_M = np.array([13.0, 47.6, 99.6, 160.7, 230.8, 310.1, 394.3, 492.6, 605.3, 732.7])
+MAX_MEMBERS_PER_METHOD = None
+CACHE_POLICY = "auto"  # "auto" builds missing cache; "refresh" rebuilds; "reuse" requires existing cache.
 
 
 plt.rcParams["font.family"] = "sans-serif"
@@ -97,6 +122,17 @@ def save_individual_panels(fig, panel_artists):
         fig.savefig(PANEL_OUTPUT_DIR / f"{panel_name}.{EXPORT_FORMAT}", **kwargs)
 
 
+ensure_pathway_cache(
+    cache_dir=CACHE_DIR,
+    forecast_base_dir=FORECAST_BASE_DIR,
+    nr_dir=NR_DIR,
+    strong_experiment=STRONG_EXPERIMENT,
+    weak_experiment=WEAK_EXPERIMENT,
+    methods=METHODS,
+    max_members_per_method=MAX_MEMBERS_PER_METHOD,
+    cache_policy=CACHE_POLICY,
+)
+
 surface = pd.read_csv(
     CACHE_DIR / "omtmp_pathway_surface_blocks.csv",
     dtype={"method": str, "member": str},
@@ -110,9 +146,16 @@ vertical = pd.read_csv(CACHE_DIR / "omtmp_pathway_vertical_summary.csv")
 
 surface["member"] = surface["member"].str.zfill(3)
 direct_member["member"] = direct_member["member"].str.zfill(3)
-expected_members = {"006", "015", "029", "037", "043", "044"}
+members_by_method = {
+    method: tuple(sorted(surface.loc[surface["method"] == method, "member"].unique(), key=member_sort_key))
+    for method in METHODS
+}
+missing_methods = [method for method, members in members_by_method.items() if not members]
+if missing_methods:
+    raise ValueError(f"No pathway cache rows for methods: {missing_methods}")
+member_order = tuple(sorted(set(surface["member"]), key=member_sort_key))
+n_cases = paired_case_count(members_by_method)
 assert set(surface["method"]) == set(METHODS)
-assert set(surface["member"]) == expected_members
 assert set(TIMES).issubset(set(surface["time_hour"]))
 
 fig = plt.figure(figsize=FIGURE_SIZE_INCH, layout="constrained")
@@ -127,14 +170,13 @@ source = surface[
 source_member = (
     source.groupby(["method", "member"], as_index=False)["dom0"].mean()
 )
-member_order = sorted(expected_members)
 x = np.arange(len(member_order), dtype=float)
 width = 0.34
 for offset, method in zip((-width / 2, width / 2), METHODS):
     values = (
         source_member[source_member["method"] == method]
         .set_index("member")
-        .loc[member_order, "dom0"]
+        .reindex(member_order)["dom0"]
         .to_numpy()
     )
     ax_a.bar(
@@ -146,7 +188,7 @@ for offset, method in zip((-width / 2, width / 2), METHODS):
         linewidth=0.5,
         label=METHOD_LABELS[method],
     )
-    ensemble_mean = float(np.mean(values))
+    ensemble_mean = float(np.nanmean(values))
     ax_a.axhline(ensemble_mean, color=METHOD_COLORS[method], lw=0.9, ls=(0, (3, 2)), alpha=0.8)
 ax_a.axhline(0.0, color="#4D4D4D", lw=0.7)
 ax_a.set_xticks(x, member_order)
@@ -157,7 +199,7 @@ ax_a.legend(ncol=2, loc="upper right", handlelength=1.4, columnspacing=0.8)
 ax_a.text(
     0.02,
     0.04,
-    "3 warming / 3 cooling members\nensemble mean ≈ 0",
+    "paired members shown individually\nmethod means shown dashed",
     transform=ax_a.transAxes,
     color="#4D4D4D",
     fontsize=6.4,
@@ -452,7 +494,7 @@ fig.text(
     0.5,
     -0.012,
     "Strong-minus-weak pairs; 0–150 km ocean blocks (~15 km), unless noted. "
-    "n=6 paired members per method; panel e uses 75–150 km and averages method-level member statistics.",
+    f"n={n_cases} paired method/member cases; panel e uses 75–150 km and averages method-level member statistics.",
     ha="center",
     va="top",
     fontsize=6.2,
