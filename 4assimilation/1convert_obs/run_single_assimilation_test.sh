@@ -1,4 +1,11 @@
 #!/bin/bash
+
+#BSUB -n 1
+#BSUB -J single_assim_test
+#BSUB -oo single_assim_test.lsf.log
+#BSUB -eo single_assim_test.lsf.err
+#BSUB -q serial
+
 #================================================================================
 # run_single_assimilation_test.sh
 #
