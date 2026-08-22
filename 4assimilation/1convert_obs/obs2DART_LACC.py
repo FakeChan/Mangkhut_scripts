@@ -86,6 +86,7 @@ if __name__ == "__main__":
             os.environ.get("obs_err_std", "0.5")
         )
     )
+    hgt_obs = int(os.environ.get("HGT_OBS", "100000"))
     #======================================================================================
     #path
     obs_dir = os.environ.get(
@@ -148,7 +149,6 @@ if __name__ == "__main__":
     else:
         obstype=170 #NOAA_18_AMSUA_TB =   170 when using DART_main
         suffix='main'
-    hgt_obs=100000
     year=2018
     month=9
     second=0
