@@ -6,60 +6,93 @@ import math
 def read_every_nth_line(file_path, start_line, step):
     selected_lines = []
     with open(file_path, 'r', encoding='utf-8') as file:
-        for i, line in enumerate(file, start=1):  
+        for i, line in enumerate(file, start=1):
             if i == start_line or (i > start_line and (i - start_line) % step == 0):
                 selected_lines.append(line.strip())
     return selected_lines
 
-def load_clear_sky_indices(mask_file, nobs):
-    if mask_file and os.path.exists(mask_file):
-        mask = np.loadtxt(mask_file).astype(bool).reshape(-1)
-        if mask.size != nobs:
-            raise ValueError(f"clear-sky mask size {mask.size} does not match nobs {nobs}: {mask_file}")
-        print(f"Using clear-sky mask {mask_file}: keep {np.sum(mask)} / {nobs}")
-        return np.where(mask)[0]
-    return np.arange(nobs)
+def load_clear_sky_indices(mask_file, nobs, required):
+    if not mask_file or not os.path.exists(mask_file):
+        if required:
+            raise FileNotFoundError(
+                f"Clear-sky mask is required but does not exist: {mask_file}"
+            )
+        return np.arange(nobs)
 
-def get_lacc_obs_error_std(obs_err_std, obs_dir, obs_subdir):
-    obs_err = float(obs_err_std)
-    if os.environ.get('USE_LACC_OBS_ERROR_SCALING', '1') != '1':
-        return obs_err
-    times_file = os.environ.get('LACC_TIMES_FILE', f'{obs_dir}/{obs_subdir}/LACC_times.txt')
-    if not obs_subdir.startswith('BT_LACC_') and not os.path.exists(times_file):
-        return obs_err
-    if os.path.exists(times_file):
-        with open(times_file, 'r', encoding='utf-8') as file:
-            ntime = sum(1 for line in file if line.startswith('lag_time='))
-    else:
-        ntime = len(str(os.environ.get('lacc_times', '')).split())
-    if ntime > 1:
-        obs_err = obs_err / math.sqrt(ntime)
-        print(f"Using LACC obs error std scaled by sqrt({ntime}): {obs_err}")
-    return obs_err
+    raw_mask = np.loadtxt(mask_file).reshape(-1)
+
+    if raw_mask.size != nobs:
+        raise ValueError(
+            f"clear-sky mask size {raw_mask.size} does not match nobs "
+            f"{nobs}: {mask_file}"
+        )
+
+    if not np.all(np.isin(raw_mask, [0, 1])):
+        raise ValueError(
+            f"clear-sky mask must contain only 0 and 1: {mask_file}"
+        )
+
+    mask = raw_mask.astype(bool)
+    indices = np.where(mask)[0]
+
+    print(
+        f"Using clear-sky mask {mask_file}: "
+        f"keep {indices.size} / {nobs}"
+    )
+    return indices
 
 if __name__ == "__main__":
     #======================================================================================
-    #basic model configure
-    domain='d01'
-    nobs=676
-    use_quantile=True
+    #basic model configure (from environment variables)
+    domain = os.environ.get("domain", "d01")
+    nobs = int(os.environ.get("NOBS", "676"))
+    use_quantile = True
+
+    day = os.environ.get("current_day", "10")
+    hour = os.environ.get("current_hour", "00")
+    minute = os.environ.get("current_min", "00")
+
+    channel = int(os.environ.get("assim_channel", "4"))
+
+    # STANDARD single-observation conversion: no LACC error scaling.
+    obs_err_single = float(
+        os.environ.get(
+            "OBS_ERR_STD",
+            os.environ.get("obs_err_std", "0.5")
+        )
+    )
+    obs_err = obs_err_single
     #======================================================================================
     #path
-    obs_dir=os.environ.get('OBS_BT_DIR','/share/home/lililei1/kcfu/tc_mangkhut/3create_obs/hx_rttov/3obs_BT/AMSUA')
-    prof_dir=os.environ.get('PROFILE_DIR','/share/home/lililei1/kcfu/tc_mangkhut/3create_obs/hx_rttov/profile')
-    output_dir='/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/1convert_obs'
-    day='10'
-    hour='00'
-    min='00'
-    channel=4
-    obs_err_from_envs='1.5'
-    obs_subdir=os.environ.get('OBS_BT_SUBDIR',f'BT_{day}_{hour}_{min}')
-    obs_file=f'{obs_dir}/{obs_subdir}/obs_d01_ch{channel}_totalline_withpert.txt'
-    clear_sky_mask_file=os.environ.get('CLEAR_SKY_MASK_FILE',f'{obs_dir}/{obs_subdir}/clear_sky_mask.txt')
-    if os.environ.get('USE_CLEAR_SKY_MASK', '1' if os.environ.get('rttov_scatt','0') == '0' else '0') != '1' and os.environ.get('CLEAR_SKY_MASK_FILE') is None:
-        clear_sky_mask_file=''
-    profile_subdir=os.environ.get('PROFILE_SUBDIR',f'profile_{domain}')
-    para_file=os.environ.get('PARA_FILE',f'{prof_dir}/{profile_subdir}/prof{day}_{hour}:{min}.dat')
+    obs_dir = os.environ.get(
+        "OBS_BT_DIR",
+        "/share/home/lililei1/kcfu/tc_mangkhut/3create_obs/hx_rttov/3obs_BT/AMSUA"
+    )
+    prof_dir = os.environ.get(
+        "PROFILE_DIR",
+        "/share/home/lililei1/kcfu/tc_mangkhut/3create_obs/hx_rttov/profile"
+    )
+    output_dir = os.environ.get(
+        "CONVERT_OUTPUT_DIR",
+        "/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/1convert_obs"
+    )
+    obs_subdir = os.environ.get(
+        "OBS_BT_SUBDIR",
+        f"BT_{day}_{hour}_{minute}"
+    )
+    obs_file = f"{obs_dir}/{obs_subdir}/obs_{domain}_ch{channel}_totalline_withpert.txt"
+    clear_sky_mask_file = os.environ.get(
+        "CLEAR_SKY_MASK_FILE",
+        f"{obs_dir}/{obs_subdir}/clear_sky_mask.txt"
+    )
+    profile_subdir = os.environ.get(
+        "PROFILE_SUBDIR",
+        f"profile_{domain}"
+    )
+    para_file = os.environ.get(
+        "PARA_FILE",
+        f"{prof_dir}/{profile_subdir}/prof{day}_{hour}:{minute}.dat"
+    )
     #=======================================================================================
     #parameters read into DART
 
@@ -72,7 +105,7 @@ if __name__ == "__main__":
 
     intday=int(day)
     inthour=int(hour)
-    intmin=int(min)
+    intmin=int(minute)
     if use_quantile:
         obstype=170  #when using DART_quantile
         suffix='quantile'
@@ -83,11 +116,35 @@ if __name__ == "__main__":
     year=2018
     month=9
     second=0
-    obs_err=get_lacc_obs_error_std(obs_err_from_envs, obs_dir, obs_subdir)
+
+    # clear-sky mask switch
+    use_clear_sky_mask = (
+        os.environ.get("USE_CLEAR_SKY_MASK", "1") == "1"
+    )
+
+    clear_sky_indices = load_clear_sky_indices(
+        clear_sky_mask_file,
+        nobs,
+        use_clear_sky_mask,
+    )
+
     obs=np.loadtxt(obs_file)
-    clear_sky_indices=load_clear_sky_indices(clear_sky_mask_file, nobs)
     angles=read_every_nth_line(para_file, start_line=188, step=185)
     locations=read_every_nth_line(para_file, start_line=186, step=185)
+
+    if len(obs) != nobs:
+        raise ValueError(
+            f"observation count {len(obs)} does not match nobs {nobs}: {obs_file}"
+        )
+    if len(angles) != nobs:
+        raise ValueError(
+            f"angle count {len(angles)} does not match nobs {nobs}: {para_file}"
+        )
+    if len(locations) != nobs:
+        raise ValueError(
+            f"location count {len(locations)} does not match nobs {nobs}: {para_file}"
+        )
+
     #make sure output converting obs to {output_dir}/{domain}
     subprocess.run(['mkdir','-p',f'{output_dir}/obs_{domain}'])
     # subprocess.run(['cd',f'{output_dir}/{domain}/'])
@@ -107,9 +164,20 @@ if __name__ == "__main__":
         data.append((obstype,lat,lon,hgt_obs,year,month,intday,inthour,intmin,second,obs_value,obs_err,sat_az,sat_ze,platform,sat,sensor,channel))
     #sequnce: obstype(int),lat,lon,height of obs(hPa),year,month,day,hour,minute,second,
     #obs_value,obs_error,sat_az,sat_ze,platform_id, sat_id, sensor_id, channel
-    # file.write(f'{obstype} {lat} {lon} {hgt_obs} {year} {month} {day} {hour} {min} ')
-    # file.write(f'{second} {obs_value:.4f} {obs_err} {sat_az} {sat_ze} {platform} {sat} {sensor} {channel}\n')
-    nobs_out=len(data)
-    with open(f"{output_dir}/obs_{domain}/kctest_{nobs_out}_obsinput_{day}_{hour}_{min}_{suffix}.txt", "w", encoding="utf-8") as file:
+
+    obs_dart_input_file = os.environ.get("OBS_DART_INPUT_FILE")
+    if obs_dart_input_file:
+        out_path = obs_dart_input_file
+    else:
+        nobs_out = len(data)
+        out_path = f"{output_dir}/obs_{domain}/kctest_{nobs_out}_obsinput_{day}_{hour}_{minute}_{suffix}.txt"
+
+    with open(out_path, "w", encoding="utf-8") as file:
         for row in data:
             file.write(format_str.format(*row) + "\n")
+
+    nobs_out = len(data)
+    print(f"Original observation count: {nobs}")
+    print(f"Filtered observation count: {nobs_out}")
+    print(f"Clear-sky mask: {clear_sky_mask_file}")
+    print(f"DART text observation input: {out_path}")

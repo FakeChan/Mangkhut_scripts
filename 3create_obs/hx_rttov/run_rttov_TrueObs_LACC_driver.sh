@@ -30,7 +30,7 @@ export npoint=676
 export nlevels=56
 export obserr_std=${obs_err_std:-0.5}
 export rttov_scatt=${rttov_scatt:-0}
-export use_total_ice=0
+export use_total_ice="${use_total_ice:-0}"
 export lacc_mode=1
 
 if [ ! -z "${cycle_flag}" ]; then

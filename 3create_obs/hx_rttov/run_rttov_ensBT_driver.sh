@@ -30,26 +30,20 @@ export nlevels=56
 
 export i_parent_start=27 #same as namelist, used in matlab code to get profile
 export j_parent_start=88
-export rttov_scatt=0 #${rttov_scatt:0} # 0: simple cloud scheme, 1: rttov_scatt
-export use_total_ice=0 #0: seperately calculate scatt effect of Snow and Ice; 1: use total ice
+export rttov_scatt="${rttov_scatt:-0}" #${rttov_scatt:0} # 0: simple cloud scheme, 1: rttov_scatt
+export use_total_ice="${use_total_ice:-0}" #0: seperately calculate scatt effect of Snow and Ice; 1: use total ice
 export lacc_mode=0
 #==============================
-#set obs time
-if [ ! -z "${cycle_flag}" ]; then  #this script is used in cycling DA
-  export obs_day=$current_day
-  export obs_hour=$current_hour
-  export obs_min=$current_min
-else  #this script is used in non-cycling DA
-  export obs_day=10
-  export obs_hour=00
-  export obs_min=00
-fi
+#set obs time (priority: obs_* > current_* > defaults)
+export obs_day="${obs_day:-${current_day:-10}}"
+export obs_hour="${obs_hour:-${current_hour:-00}}"
+export obs_min="${obs_min:-${current_min:-00}}"
 #==============================
 #set work dir
 export work_dir=/share/home/lililei1/kcfu/tc_mangkhut/3create_obs/hx_rttov 
 export run_matlab_dir=${work_dir}/profile
 # export ens_wrfout_dir=/share/home/lililei1/kcfu/tc_mangkhut/2ens_free_fcst/
-export ens_wrfout_dir=/scratch/lililei1/kcfu/tc_mangkhut/2ens_free_fcst/
+export ens_wrfout_dir="${ens_wrfout_dir:-/scratch/lililei1/kcfu/tc_mangkhut/2ens_free_fcst/}"
 export rttov_dir=/share/home/lililei1/kcfu/models/rttov123
 export prof_dir=${work_dir}/profile/profile_${domain}
 export obs_dir=${work_dir}/4ens_BT

@@ -28,20 +28,14 @@ export domain=d01
 export npoint=676
 export nlevels=56
 export obserr_std=${obs_err_std:-0.5}
-export rttov_scatt=0 # 0 simple cloud scheme; 1 RTTOV-SCATT
-export use_total_ice=0 #0: seperately calculate scatt effect of Snow and Ice; 1: use total ice
+export rttov_scatt="${rttov_scatt:-0}" # 0 simple cloud scheme; 1 RTTOV-SCATT
+export use_total_ice="${use_total_ice:-0}" #0: seperately calculate scatt effect of Snow and Ice; 1: use total ice
 export lacc_mode=0
 #==============================
-#set obs time
-if [ ! -z "${cycle_flag}" ]; then  #this script is used in cycling DA
-  export obs_day=$current_day
-  export obs_hour=$current_hour
-  export obs_min=$current_min
-else  #this script is used in non-cycling DA
-  export obs_day=10
-  export obs_hour=00
-  export obs_min=00
-fi
+#set obs time (priority: obs_* > current_* > defaults)
+export obs_day="${obs_day:-${current_day:-10}}"
+export obs_hour="${obs_hour:-${current_hour:-00}}"
+export obs_min="${obs_min:-${current_min:-00}}"
 
 echo "truth rttov time: ${obs_day}_${obs_hour}_${obs_min}"
 #==============================

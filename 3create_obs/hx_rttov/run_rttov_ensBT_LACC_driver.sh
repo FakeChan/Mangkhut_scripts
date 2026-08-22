@@ -31,11 +31,11 @@ export nlevels=56
 export i_parent_start=27
 export j_parent_start=88
 export rttov_scatt=${rttov_scatt:-0}
-export use_total_ice=0
+export use_total_ice="${use_total_ice:-0}"
 export profile_matlab_flag=${profile_matlab_flag:-1}
 export lacc_mode=1
 
-lacc_skip_rttov=1  #skip rttov and matlab if no more time need to be calculated
+lacc_skip_rttov=${lacc_skip_rttov:-1}
 
 if [ ! -z "${cycle_flag}" ]; then
 	export lacc_center_day=${lacc_center_day:-$current_day}

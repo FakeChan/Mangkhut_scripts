@@ -94,7 +94,16 @@ if clear_sky_mode
     geopot=squeeze(wrfd01.data('PH')) + squeeze(wrfd01.data('PHB'));
     clear_sky_mask=zeros(npoint,1);
     hydrometeor_path=zeros(npoint,1);
-    clear_sky_thresh=0.01; % kg m^-2 for RWP + SWP + GWP
+    clear_sky_thresh_env = getenv('CLEAR_SKY_THRESHOLD');
+    if isempty(clear_sky_thresh_env)
+        clear_sky_thresh = 0.2;
+    else
+        clear_sky_thresh = str2double(clear_sky_thresh_env);
+        if isnan(clear_sky_thresh) || ~isfinite(clear_sky_thresh) || clear_sky_thresh <= 0
+            error('CLEAR_SKY_THRESHOLD must be a positive finite number.');
+        end
+    end
+    fprintf('Clear-sky HWP threshold = %.6f kg m^-2\n', clear_sky_thresh);
 end
 
 %%set up ozone profile
