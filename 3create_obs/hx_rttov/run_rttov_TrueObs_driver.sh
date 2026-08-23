@@ -42,7 +42,7 @@ echo "truth rttov time: ${obs_day}_${obs_hour}_${obs_min}"
 #set work dir
 export work_dir=/share/home/lililei1/kcfu/tc_mangkhut/3create_obs/hx_rttov 
 export run_matlab_dir=${work_dir}/profile
-export NR_wrfout_dir=/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/
+export NR_wrfout_dir=/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/2domain/
 export rttov_dir=/share/home/lililei1/kcfu/models/rttov123
 export prof_dir=${work_dir}/profile/profile_${domain}
 export obs_dir=${work_dir}/3obs_BT
@@ -90,3 +90,21 @@ bash ${merge_dir}/5_hebing_diffchan_d01.sh
 #==============================
 #step 4 add pert
 bash ${add_pert_dir}/add_pert.sh
+
+#==============================
+#step 5 place the clear-sky mask in the obs BT dir
+#  matlab writes it to ${prof_dir}/clear_sky_mask_${obs_day}_${obs_hour}:${obs_min}.txt
+#  (time string contains ':'), while the single-test pipeline expects
+#  ${obs_dir}/${instrument}/BT_${obs_day}_${obs_hour}_${obs_min}/clear_sky_mask.txt.
+#==============================
+if [[ "${rttov_scatt}" == "0" ]]; then
+    mask_src="${prof_dir}/clear_sky_mask_${obs_day}_${obs_hour}:${obs_min}.txt"
+    mask_dst_dir="${obs_dir}/${instrument}/BT_${obs_day}_${obs_hour}_${obs_min}"
+    if [[ ! -f "${mask_src}" ]]; then
+        echo "WARNING: clear-sky mask not found: ${mask_src}" >&2
+    else
+        mkdir -p "${mask_dst_dir}"
+        cp -f "${mask_src}" "${mask_dst_dir}/clear_sky_mask.txt"
+        echo "clear-sky mask placed at: ${mask_dst_dir}/clear_sky_mask.txt"
+    fi
+fi
