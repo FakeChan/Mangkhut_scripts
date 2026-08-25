@@ -45,12 +45,27 @@ if mask_count > 0
     if mask_count ~= length(lacc_times)
         error('Only %d/%d LACC lag times have clear_sky_mask.txt.', mask_count, length(lacc_times));
     end
-    clear_sky_mask = mask_sum == length(lacc_times);
-    hydrometeor_path_mean = hydrometeor_path_sum ./ length(lacc_times);
+    n_lacc_times = length(lacc_times);
+    clear_sky_frac_env = getenv('CLEAR_SKY_MIN_FRACTION');
+    if isempty(clear_sky_frac_env)
+        clear_sky_frac = 2/3;                     % default: 2/3
+    else
+        clear_sky_frac = str2double(clear_sky_frac_env);
+        if isnan(clear_sky_frac) || clear_sky_frac <= 0 || clear_sky_frac > 1
+            error('CLEAR_SKY_MIN_FRACTION must be in (0,1], got %s.', clear_sky_frac_env);
+        end
+    end
+    required_times = floor(clear_sky_frac * n_lacc_times);
+    % guard: for N=1, floor(2/3) = 0 would let every point pass;
+    % require at least 1 clear time so the filter still applies.
+    required_times = max(1, min(required_times, n_lacc_times));
+    clear_sky_mask = mask_sum >= required_times;
+    hydrometeor_path_mean = hydrometeor_path_sum ./ n_lacc_times;
     dlmwrite([out_dir 'clear_sky_mask.txt'], clear_sky_mask, 'precision', '%d', 'delimiter', '\t');
     dlmwrite([out_dir 'hydrometeor_path.txt'], hydrometeor_path_mean, 'precision', '%.8f', 'delimiter', '\t');
-    fprintf('LACC clear-sky mask written to %s; clear obs = %d / %d\n', ...
-        [out_dir 'clear_sky_mask.txt'], sum(clear_sky_mask), length(clear_sky_mask));
+    fprintf('LACC clear-sky mask written to %s; clear obs = %d / %d; requires >= %d of %d lag-time clear\n', ...
+        [out_dir 'clear_sky_mask.txt'], sum(clear_sky_mask), length(clear_sky_mask), ...
+        required_times, n_lacc_times);
 end
 
 for chnumi = 1:chnum

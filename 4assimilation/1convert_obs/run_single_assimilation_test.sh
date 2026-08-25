@@ -30,7 +30,7 @@ CENTER_HOUR="${CENTER_HOUR:-00}"
 CENTER_MIN="${CENTER_MIN:-00}"
 
 ASSIM_CHANNEL="${ASSIM_CHANNEL:-4}"
-LACC_LAG_HOURS="${LACC_LAG_HOURS:-0 3 6 9}"
+LACC_LAG_HOURS="${LACC_LAG_HOURS:-0 3 6}"
 
 ENS_SIZE="${ENS_SIZE:-50}"
 ENS_WRFOUT_DIR="${ENS_WRFOUT_DIR:-/scratch/lililei1/kcfu/tc_mangkhut/2ens_free_fcst}"
@@ -40,6 +40,10 @@ USE_TOTAL_ICE="${USE_TOTAL_ICE:-0}"
 
 USE_CLEAR_SKY_MASK="${USE_CLEAR_SKY_MASK:-1}"
 CLEAR_SKY_THRESHOLD="${CLEAR_SKY_THRESHOLD:-0.2}"
+
+# Min. fraction of LACC lag times that must be clear-sky for a point to pass.
+# Empty -> average_LACC_obs.m uses its default 2/3 (floor(2/3 * N) times).
+CLEAR_SKY_MIN_FRACTION="${CLEAR_SKY_MIN_FRACTION:-}"
 
 OBS_ERR_STD="${OBS_ERR_STD:-0.5}"
 
@@ -51,7 +55,7 @@ RUN_TEXT_TO_OBS="${RUN_TEXT_TO_OBS:-1}"
 RUN_VALIDATION="${RUN_VALIDATION:-1}"
 
 OBS_SEQ_OUT_NAME="${OBS_SEQ_OUT_NAME:-obs_seq.out_kctest1_d01_10_00_00_LACC_ch4_clear02}"
-OVERWRITE_OBS_SEQ="${OVERWRITE_OBS_SEQ:-0}"
+OVERWRITE_OBS_SEQ="${OVERWRITE_OBS_SEQ:-1}"
 
 #==============================================================================
 # fixed paths
@@ -133,6 +137,9 @@ export use_total_ice="${USE_TOTAL_ICE}"
 
 export USE_CLEAR_SKY_MASK
 export CLEAR_SKY_THRESHOLD
+if [[ -n "${CLEAR_SKY_MIN_FRACTION}" ]]; then
+    export CLEAR_SKY_MIN_FRACTION
+fi
 export OBS_ERR_STD
 export obs_err_std="${OBS_ERR_STD}"
 
@@ -632,6 +639,7 @@ echo "Cloud-affected:              ${cloud_shown}"
 echo "Clear-sky mask applied:      ${mask_applied_shown}"
 if [[ "${EXPERIMENT_MODE}" == "LACC" ]]; then
     echo "LACC time count:             ${EXPECTED_LACC_COUNT}"
+    echo "Clear-sky min fraction:      ${CLEAR_SKY_MIN_FRACTION:-2/3 (default)}"
     echo "Single-time obs error std:   ${OBS_ERR_STD} K"
     echo "Final LACC obs error std:    ${LACC_FINAL_ERR_STD} K"
 else
