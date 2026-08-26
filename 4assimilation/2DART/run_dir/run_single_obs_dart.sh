@@ -60,7 +60,9 @@ DART_SOURCE_ROOT="${DART_SOURCE_ROOT:-/share/home/lililei1/kcfu/models/DART_main
 # original/complete observation file.
 # NOTE: this is an independent configuration item (not bound to PROJECT_ROOT);
 # it may be overridden entirely via the SOURCE_OBS_FILE environment variable.
-SOURCE_OBS_FILE="${SOURCE_OBS_FILE:-${DART_SOURCE_ROOT}/models/LMDZ/work/obs_seq.out}"
+# Default: the clear-sky-filtered LACC ch4 obs_seq produced by
+# run_single_assimilation_test.sh (LACC_LAG_HOURS="0 3 6", ch4, clear02).
+SOURCE_OBS_FILE="${SOURCE_OBS_FILE:-/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/1convert_obs/run_dir/obs_seq.out_kctest1_d01_10_00_00_LACC_ch4_clear02}"
 
 # python interpreter used to parse obs_seq, compute crop bounds and edit namelists
 PYTHON_EXE="${PYTHON_EXE:-/share/home/lililei1/kcfu/anaconda/envs/wrf/bin/python}"
