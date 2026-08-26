@@ -587,11 +587,19 @@ extract_observation_location() {
 check_stale_outputs() {
     CURRENT_STEP="check_stale_outputs"
     local -a stale=()
+    # Only nullglob's `post_assim_me*` may be glob-expanded; a bare literal
+    # path (no glob metacharacters) is always kept verbatim by the shell, so
+    # test.out/fkc_dart must be checked for actual existence with -e, not
+    # stuffed into a nullglob array (that made them "stale" unconditionally).
     shopt -s nullglob
-    stale=( "${DART_RUN_DIR}"/post_assim_me* \
-            "${DART_RUN_DIR}"/test.out \
-            "${DART_RUN_DIR}"/fkc_dart )
+    stale=( "${DART_RUN_DIR}"/post_assim_me* )
     shopt -u nullglob
+    if [[ -e "${DART_RUN_DIR}/test.out" ]]; then
+        stale+=( "${DART_RUN_DIR}/test.out" )
+    fi
+    if [[ -e "${DART_RUN_DIR}/fkc_dart" ]]; then
+        stale+=( "${DART_RUN_DIR}/fkc_dart" )
+    fi
     if (( ${#stale[@]} > 0 )); then
         local f=""
         for f in "${stale[@]}"; do
