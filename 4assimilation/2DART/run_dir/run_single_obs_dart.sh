@@ -32,9 +32,10 @@ set -Eeuo pipefail
 #  10) submit_dart_job                      - bsub < sub_dart.sh, parse job id
 #  11) wait_for_lsf_job                     - poll bjobs/bjobs -a/bhist until a
 #                                             definitive final state
-#  12) check_dart_outputs                   - verify fkc_dart, test.out, postassim_mem*
-#  13) archive_outputs                      - move outputs (postassim_mem*,
-#                                         test.out, fkc_dart); honest report
+#  12) check_dart_outputs                   - verify fkc_dart, test.out,
+#                                         postassim_mem*, postassim_mean_d0*
+#  13) archive_outputs                      - move outputs (postassim_mem* postassim_mean_d0*
+#                                         test.out fkc_dart); honest partial-failure report
 #
 # One FILTER_TYPE and one OBS_INDEX per run; nothing is submitted twice.
 # All python is invoked with ${PYTHON_EXE}; no bare python/python3.
@@ -590,12 +591,13 @@ extract_observation_location() {
 check_stale_outputs() {
     CURRENT_STEP="check_stale_outputs"
     local -a stale=()
-    # Only nullglob's `postassim_mem*` may be glob-expanded; a bare literal
-    # path (no glob metacharacters) is always kept verbatim by the shell, so
+    # Only the two globs below may be expanded here; a bare literal path (no
+    # glob metacharacters) is always kept verbatim by the shell, so
     # test.out/fkc_dart must be checked for actual existence with -e, not
     # stuffed into a nullglob array (that made them "stale" unconditionally).
     shopt -s nullglob
-    stale=( "${DART_RUN_DIR}"/postassim_mem* )
+    stale=( "${DART_RUN_DIR}"/postassim_mem*
+            "${DART_RUN_DIR}"/postassim_mean_d0* )
     shopt -u nullglob
     if [[ -e "${DART_RUN_DIR}/test.out" ]]; then
         stale+=( "${DART_RUN_DIR}/test.out" )
@@ -608,9 +610,9 @@ check_stale_outputs() {
         for f in "${stale[@]}"; do
             log_line "stale output blocking this run: ${f}"
         done
-        fatal "${#stale[@]} stale output(s) found in DART run dir (postassim_mem*/test.out/fkc_dart); remove or archive them first"
+        fatal "${#stale[@]} stale output(s) found in DART run dir (postassim_mem*/postassim_mean_d0*/test.out/fkc_dart); remove or archive them first"
     fi
-    log_line "no stale postassim_mem*/test.out/fkc_dart in DART run dir"
+    log_line "no stale postassim_mem*/postassim_mean_d0*/test.out/fkc_dart in DART run dir"
 }
 
 #------------------------------------------------------------------------------
@@ -914,16 +916,21 @@ wait_for_lsf_job() {
 }
 
 #------------------------------------------------------------------------------
-# verify DART completion: fkc_dart marker + test.out + postassim_mem*
+# verify DART completion: fkc_dart marker + test.out + postassim_mem* +
+# postassim_mean_d0*
 #------------------------------------------------------------------------------
 check_dart_outputs() {
     CURRENT_STEP="check_dart_outputs"
-    local -a pa=()
+    local -a pa=() pm=()
     shopt -s nullglob
     pa=( "${DART_RUN_DIR}"/postassim_mem* )
+    pm=( "${DART_RUN_DIR}"/postassim_mean_d0* )
     shopt -u nullglob
     if (( ${#pa[@]} == 0 )); then
         fatal "no postassim_mem* files found in ${DART_RUN_DIR}; DART did not produce ensemble analysis output"
+    fi
+    if (( ${#pm[@]} == 0 )); then
+        fatal "no postassim_mean_d0* files found in ${DART_RUN_DIR}; DART did not produce the per-domain analysis mean"
     fi
     if [[ ! -f "${DART_RUN_DIR}/test.out" ]]; then
         fatal "test.out does not exist in ${DART_RUN_DIR}"
@@ -940,29 +947,33 @@ check_dart_outputs() {
         log_line "WARNING: test.err is non-empty (warnings/notes may be written to stderr):"
         tail -n 20 "${DART_RUN_DIR}/test.err" | sed 's/^/    /'
     fi
-    log_line "DART outputs present: ${#pa[@]} postassim_mem* file(s), test.out (non-empty), fkc_dart"
+    log_line "DART outputs present: ${#pa[@]} postassim_mem* file(s), ${#pm[@]} postassim_mean_d0* file(s), test.out (non-empty), fkc_dart"
 }
 
 #------------------------------------------------------------------------------
-# archive postassim_mem*, test.out and fkc_dart, never overwriting existing
-# archives
+# archive postassim_mem*, postassim_mean_d0*, test.out and fkc_dart, never
+# overwriting existing archives
 #------------------------------------------------------------------------------
 archive_outputs() {
     CURRENT_STEP="archive_outputs"
     local archive_dir="${ARCHIVE_ROOT}/${FILTER_TYPE}/obs_seq${OBS_INDEX}"
-    local -a pa=()
+    local -a pa=() pm=()
     shopt -s nullglob
     pa=( "${DART_RUN_DIR}"/postassim_mem* )
+    pm=( "${DART_RUN_DIR}"/postassim_mean_d0* )
     shopt -u nullglob
     if (( ${#pa[@]} == 0 )); then
         fatal "no postassim_mem* to archive in ${DART_RUN_DIR}"
+    fi
+    if (( ${#pm[@]} == 0 )); then
+        fatal "no postassim_mean_d0* to archive in ${DART_RUN_DIR}"
     fi
     mkdir -p "$(dirname "${archive_dir}")" "${archive_dir}"
     if [[ -d "${archive_dir}" && -n "$(ls -A "${archive_dir}" 2>/dev/null)" ]]; then
         fatal "archive directory exists and is not empty; refusing to overwrite: ${archive_dir}"
     fi
 
-    local -a move_targets=("${pa[@]}" "${DART_RUN_DIR}/test.out" "${DART_RUN_DIR}/fkc_dart")
+    local -a move_targets=("${pa[@]}" "${pm[@]}" "${DART_RUN_DIR}/test.out" "${DART_RUN_DIR}/fkc_dart")
     local -a moved_files=()
     local -a failed_files=()
     local f=""
@@ -983,7 +994,8 @@ archive_outputs() {
         printf '    %s\n' "${failed_files[@]+"${failed_files[@]}"}"
         local -a leftover=()
         shopt -s nullglob
-        leftover=( "${DART_RUN_DIR}"/postassim_mem* )
+        leftover=( "${DART_RUN_DIR}"/postassim_mem*
+                   "${DART_RUN_DIR}"/postassim_mean_d0* )
         shopt -u nullglob
         if [[ -e "${DART_RUN_DIR}/test.out" ]]; then
             leftover+=( "${DART_RUN_DIR}/test.out" )
@@ -999,12 +1011,16 @@ archive_outputs() {
     fi
 
     # verify what landed in the archive
-    local -a archived_pa=()
+    local -a archived_pa=() archived_pm=()
     shopt -s nullglob
     archived_pa=( "${archive_dir}"/postassim_mem* )
+    archived_pm=( "${archive_dir}"/postassim_mean_d0* )
     shopt -u nullglob
     if (( ${#archived_pa[@]} != ${#pa[@]} )); then
         fatal "archive incomplete: expected ${#pa[@]} postassim_mem* files, found ${#archived_pa[@]} in ${archive_dir}"
+    fi
+    if (( ${#archived_pm[@]} != ${#pm[@]} )); then
+        fatal "archive incomplete: expected ${#pm[@]} postassim_mean_d0* files, found ${#archived_pm[@]} in ${archive_dir}"
     fi
     if [[ ! -s "${archive_dir}/test.out" ]]; then
         fatal "archived test.out missing or empty in ${archive_dir}"
@@ -1019,7 +1035,8 @@ archive_outputs() {
     # test.out/fkc_dart must be tested with -e)
     local -a leftover=()
     shopt -s nullglob
-    leftover=( "${DART_RUN_DIR}"/postassim_mem* )
+    leftover=( "${DART_RUN_DIR}"/postassim_mem*
+               "${DART_RUN_DIR}"/postassim_mean_d0* )
     shopt -u nullglob
     if [[ -e "${DART_RUN_DIR}/test.out" ]]; then
         leftover+=( "${DART_RUN_DIR}/test.out" )
