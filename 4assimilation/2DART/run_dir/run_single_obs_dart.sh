@@ -32,12 +32,12 @@ set -Eeuo pipefail
 #  10) submit_dart_job                      - bsub < sub_dart.sh, parse job id
 #  11) wait_for_lsf_job                     - poll bjobs/bjobs -a/bhist until a
 #                                             definitive final state
-#  12) check_dart_outputs                   - verify fkc_dart, test.out, post_assim_me*
+#  12) check_dart_outputs                   - verify fkc_dart, test.out, postassim_mem*
 #  13) archive_outputs                      - move outputs; honest partial-failure report
 #
 # One FILTER_TYPE and one OBS_INDEX per run; nothing is submitted twice.
 # All python is invoked with ${PYTHON_EXE}; no bare python/python3.
-# No eval, no unconstrained rm wildcards; post_assim_me* is handled with
+# No eval, no unconstrained rm wildcards; postassim_mem* is handled with
 # nullglob + bash arrays.
 #================================================================================
 
@@ -587,12 +587,12 @@ extract_observation_location() {
 check_stale_outputs() {
     CURRENT_STEP="check_stale_outputs"
     local -a stale=()
-    # Only nullglob's `post_assim_me*` may be glob-expanded; a bare literal
+    # Only nullglob's `postassim_mem*` may be glob-expanded; a bare literal
     # path (no glob metacharacters) is always kept verbatim by the shell, so
     # test.out/fkc_dart must be checked for actual existence with -e, not
     # stuffed into a nullglob array (that made them "stale" unconditionally).
     shopt -s nullglob
-    stale=( "${DART_RUN_DIR}"/post_assim_me* )
+    stale=( "${DART_RUN_DIR}"/postassim_mem* )
     shopt -u nullglob
     if [[ -e "${DART_RUN_DIR}/test.out" ]]; then
         stale+=( "${DART_RUN_DIR}/test.out" )
@@ -605,9 +605,9 @@ check_stale_outputs() {
         for f in "${stale[@]}"; do
             log_line "stale output blocking this run: ${f}"
         done
-        fatal "${#stale[@]} stale output(s) found in DART run dir (post_assim_me*/test.out/fkc_dart); remove or archive them first"
+        fatal "${#stale[@]} stale output(s) found in DART run dir (postassim_mem*/test.out/fkc_dart); remove or archive them first"
     fi
-    log_line "no stale post_assim_me*/test.out/fkc_dart in DART run dir"
+    log_line "no stale postassim_mem*/test.out/fkc_dart in DART run dir"
 }
 
 #------------------------------------------------------------------------------
@@ -911,16 +911,16 @@ wait_for_lsf_job() {
 }
 
 #------------------------------------------------------------------------------
-# verify DART completion: fkc_dart marker + test.out + post_assim_me*
+# verify DART completion: fkc_dart marker + test.out + postassim_mem*
 #------------------------------------------------------------------------------
 check_dart_outputs() {
     CURRENT_STEP="check_dart_outputs"
     local -a pa=()
     shopt -s nullglob
-    pa=( "${DART_RUN_DIR}"/post_assim_me* )
+    pa=( "${DART_RUN_DIR}"/postassim_mem* )
     shopt -u nullglob
     if (( ${#pa[@]} == 0 )); then
-        fatal "no post_assim_me* files found in ${DART_RUN_DIR}; DART did not produce ensemble analysis output"
+        fatal "no postassim_mem* files found in ${DART_RUN_DIR}; DART did not produce ensemble analysis output"
     fi
     if [[ ! -f "${DART_RUN_DIR}/test.out" ]]; then
         fatal "test.out does not exist in ${DART_RUN_DIR}"
@@ -937,21 +937,21 @@ check_dart_outputs() {
         log_line "WARNING: test.err is non-empty (warnings/notes may be written to stderr):"
         tail -n 20 "${DART_RUN_DIR}/test.err" | sed 's/^/    /'
     fi
-    log_line "DART outputs present: ${#pa[@]} post_assim_me* file(s), test.out (non-empty), fkc_dart"
+    log_line "DART outputs present: ${#pa[@]} postassim_mem* file(s), test.out (non-empty), fkc_dart"
 }
 
 #------------------------------------------------------------------------------
-# archive post_assim_me* and test.out, never overwriting existing archives
+# archive postassim_mem* and test.out, never overwriting existing archives
 #------------------------------------------------------------------------------
 archive_outputs() {
     CURRENT_STEP="archive_outputs"
     local archive_dir="${ARCHIVE_ROOT}/${FILTER_TYPE}/obs_seq${OBS_INDEX}"
     local -a pa=()
     shopt -s nullglob
-    pa=( "${DART_RUN_DIR}"/post_assim_me* )
+    pa=( "${DART_RUN_DIR}"/postassim_mem* )
     shopt -u nullglob
     if (( ${#pa[@]} == 0 )); then
-        fatal "no post_assim_me* to archive in ${DART_RUN_DIR}"
+        fatal "no postassim_mem* to archive in ${DART_RUN_DIR}"
     fi
     mkdir -p "$(dirname "${archive_dir}")" "${archive_dir}"
     if [[ -d "${archive_dir}" && -n "$(ls -A "${archive_dir}" 2>/dev/null)" ]]; then
@@ -979,7 +979,7 @@ archive_outputs() {
         printf '    %s\n' "${failed_files[@]+"${failed_files[@]}"}"
         local -a leftover=()
         shopt -s nullglob
-        leftover=( "${DART_RUN_DIR}"/post_assim_me* "${DART_RUN_DIR}"/test.out )
+        leftover=( "${DART_RUN_DIR}"/postassim_mem* "${DART_RUN_DIR}"/test.out )
         shopt -u nullglob
         if (( ${#leftover[@]} > 0 )); then
             log_line "files still present in DART run dir:"
@@ -991,10 +991,10 @@ archive_outputs() {
     # verify what landed in the archive
     local -a archived_pa=()
     shopt -s nullglob
-    archived_pa=( "${archive_dir}"/post_assim_me* )
+    archived_pa=( "${archive_dir}"/postassim_mem* )
     shopt -u nullglob
     if (( ${#archived_pa[@]} != ${#pa[@]} )); then
-        fatal "archive incomplete: expected ${#pa[@]} post_assim_me* files, found ${#archived_pa[@]} in ${archive_dir}"
+        fatal "archive incomplete: expected ${#pa[@]} postassim_mem* files, found ${#archived_pa[@]} in ${archive_dir}"
     fi
     if [[ ! -s "${archive_dir}/test.out" ]]; then
         fatal "archived test.out missing or empty in ${archive_dir}"
@@ -1003,7 +1003,7 @@ archive_outputs() {
     # verify originals are gone
     local -a leftover=()
     shopt -s nullglob
-    leftover=( "${DART_RUN_DIR}"/post_assim_me* "${DART_RUN_DIR}"/test.out )
+    leftover=( "${DART_RUN_DIR}"/postassim_mem* "${DART_RUN_DIR}"/test.out )
     shopt -u nullglob
     if (( ${#leftover[@]} > 0 )); then
         local lf=""
