@@ -112,7 +112,7 @@ if __name__ == "__main__":
     else:
         obstype=170 #NOAA_18_AMSUA_TB =   170 when using DART_main
         suffix='main'
-    hgt_obs=90000
+    hgt_obs = int(os.environ.get("HGT_OBS", "90000"))
     year=2018
     month=9
     second=0

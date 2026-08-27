@@ -119,7 +119,7 @@ if __name__ == "__main__":
         obs_value=obs[i]
         sat_ze=float(angles[i].split()[0])
         sat_az=float(angles[i].split()[1])
-        hgt_obs=90000
+        hgt_obs = int(os.environ.get("HGT_OBS", "90000"))
         lat=float(locations[i].split()[1])
         lon=float(locations[i].split()[2])
         data.append((obstype,lat,lon,hgt_obs,year,month,intday,inthour,intmin,second,obs_value,obs_err,sat_az,sat_ze,platform,sat,sensor,channel))

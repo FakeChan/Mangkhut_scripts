@@ -47,6 +47,11 @@ CLEAR_SKY_MIN_FRACTION="${CLEAR_SKY_MIN_FRACTION:-}"
 
 OBS_ERR_STD="${OBS_ERR_STD:-0.5}"
 
+# Observation vertical coordinate (pressure, Pa) written into obs_seq.out.
+# Must be BELOW the model surface pressure at the obs location, otherwise
+# DART fails the vertical conversion and rejects the obs (QC=8).
+HGT_OBS="${HGT_OBS:-100000}"
+
 RUN_TRUTH="${RUN_TRUTH:-1}"
 RUN_ENSEMBLE="${RUN_ENSEMBLE:-1}"
 RUN_OBS_CONVERT="${RUN_OBS_CONVERT:-1}"
@@ -142,6 +147,7 @@ if [[ -n "${CLEAR_SKY_MIN_FRACTION}" ]]; then
 fi
 export OBS_ERR_STD
 export obs_err_std="${OBS_ERR_STD}"
+export HGT_OBS
 
 # number of distinct LACC lag hours -> EXPECTED_LACC_COUNT
 # every lag must be a non-negative integer; at least one must be 0 (center time)
