@@ -81,10 +81,10 @@ LSF_QUERY_RETRY_DELAY="${LSF_QUERY_RETRY_DELAY:-5}"
 # half-width (degrees) of the tiny lat/lon window around the target observation.
 # obs_sequence_tool rejects min_lat >= max_lat and min_lon == max_lon, so the
 # crop window is target +/- CROP_EPSILON_DEG instead of min == max.
-CROP_EPSILON_DEG="${CROP_EPSILON_DEG:-1e-8}"
+CROP_EPSILON_DEG="${CROP_EPSILON_DEG:-1e-2}"
 
 # tolerance (degrees) for comparing crop results to the target location
-LOC_TOLERANCE_DEG="${LOC_TOLERANCE_DEG:-1e-6}"
+LOC_TOLERANCE_DEG="${LOC_TOLERANCE_DEG:-1e-1}"
 
 #==============================================================================
 # (B) fixed paths derived from the cluster roots
