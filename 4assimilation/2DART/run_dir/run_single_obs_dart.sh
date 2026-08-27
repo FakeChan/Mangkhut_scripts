@@ -33,12 +33,15 @@ set -Eeuo pipefail
 #  11) wait_for_lsf_job                     - poll bjobs/bjobs -a/bhist until a
 #                                             definitive final state
 #  12) check_dart_outputs                   - verify fkc_dart, test.out, postassim_mem*
-#  13) archive_outputs                      - move outputs; honest partial-failure report
+#  13) archive_outputs                      - move outputs (postassim_mem*,
+#                                         test.out, fkc_dart); honest report
 #
 # One FILTER_TYPE and one OBS_INDEX per run; nothing is submitted twice.
 # All python is invoked with ${PYTHON_EXE}; no bare python/python3.
 # No eval, no unconstrained rm wildcards; postassim_mem* is handled with
-# nullglob + bash arrays.
+# nullglob + bash arrays, while literal names such as test.out/fkc_dart hold
+# no glob metacharacters: nullglob never removes a non-pattern word, so their
+# presence/absence is always tested explicitly with -e.
 #================================================================================
 
 #==============================================================================
@@ -941,7 +944,8 @@ check_dart_outputs() {
 }
 
 #------------------------------------------------------------------------------
-# archive postassim_mem* and test.out, never overwriting existing archives
+# archive postassim_mem*, test.out and fkc_dart, never overwriting existing
+# archives
 #------------------------------------------------------------------------------
 archive_outputs() {
     CURRENT_STEP="archive_outputs"
@@ -958,7 +962,7 @@ archive_outputs() {
         fatal "archive directory exists and is not empty; refusing to overwrite: ${archive_dir}"
     fi
 
-    local -a move_targets=("${pa[@]}" "${DART_RUN_DIR}/test.out")
+    local -a move_targets=("${pa[@]}" "${DART_RUN_DIR}/test.out" "${DART_RUN_DIR}/fkc_dart")
     local -a moved_files=()
     local -a failed_files=()
     local f=""
@@ -979,8 +983,14 @@ archive_outputs() {
         printf '    %s\n' "${failed_files[@]+"${failed_files[@]}"}"
         local -a leftover=()
         shopt -s nullglob
-        leftover=( "${DART_RUN_DIR}"/postassim_mem* "${DART_RUN_DIR}"/test.out )
+        leftover=( "${DART_RUN_DIR}"/postassim_mem* )
         shopt -u nullglob
+        if [[ -e "${DART_RUN_DIR}/test.out" ]]; then
+            leftover+=( "${DART_RUN_DIR}/test.out" )
+        fi
+        if [[ -e "${DART_RUN_DIR}/fkc_dart" ]]; then
+            leftover+=( "${DART_RUN_DIR}/fkc_dart" )
+        fi
         if (( ${#leftover[@]} > 0 )); then
             log_line "files still present in DART run dir:"
             printf '    %s\n' "${leftover[@]+"${leftover[@]}"}"
@@ -999,12 +1009,24 @@ archive_outputs() {
     if [[ ! -s "${archive_dir}/test.out" ]]; then
         fatal "archived test.out missing or empty in ${archive_dir}"
     fi
+    # fkc_dart is a marker created by touch in sub_dart.sh; zero bytes are
+    # expected, so verify existence only (-f), not emptiness like test.out
+    if [[ ! -f "${archive_dir}/fkc_dart" ]]; then
+        fatal "archived fkc_dart missing in ${archive_dir}"
+    fi
 
-    # verify originals are gone
+    # verify originals are gone (literal non-glob words survive nullglob, so
+    # test.out/fkc_dart must be tested with -e)
     local -a leftover=()
     shopt -s nullglob
-    leftover=( "${DART_RUN_DIR}"/postassim_mem* "${DART_RUN_DIR}"/test.out )
+    leftover=( "${DART_RUN_DIR}"/postassim_mem* )
     shopt -u nullglob
+    if [[ -e "${DART_RUN_DIR}/test.out" ]]; then
+        leftover+=( "${DART_RUN_DIR}/test.out" )
+    fi
+    if [[ -e "${DART_RUN_DIR}/fkc_dart" ]]; then
+        leftover+=( "${DART_RUN_DIR}/fkc_dart" )
+    fi
     if (( ${#leftover[@]} > 0 )); then
         local lf=""
         for lf in "${leftover[@]}"; do
