@@ -1,4 +1,5 @@
 import numpy as np
+import warnings
 import netCDF4
 import xarray as xr
 import matplotlib
@@ -157,11 +158,26 @@ if __name__ == '__main__':
     obs_seq_file = '/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/1convert_obs/run_dir/obs_seq.out_kctest1_d01_10_00_00_LACC_ch4'
     sample_wrf_file = f'{prior_dir}/firstguess_d01.mem001'
     truth_txt_file = '/share/home/lililei1/kcfu/tc_mangkhut/3create_obs/hx_rttov/3obs_BT_LACC/AMSUA/BT_LACC_10_00_00/obs_d01_ch4_totalline.txt'
-    
+
+    # clear sky mode 开关：True 时读取 clear_sky_mask.txt，筛选未加扰动的真值观测，
+    # 使其与 clear 版 obs_seq（如 ..._LACC_ch4_clear02）逐条对齐（此时 obs_seq_file 也应指向 clear 版）
+    USE_CLEAR_SKY_MASK = False
+    clear_sky_mask_file = '/share/home/lililei1/kcfu/tc_mangkhut/3create_obs/hx_rttov/3obs_BT_LACC/AMSUA/BT_LACC_10_00_00/clear_sky_mask.txt'
+
     # 提取观测元数据
-    hx_lats, hx_lons, hx_ens_lists = extract_obs_seq(obs_seq_file)  
+    hx_lats, hx_lons, hx_ens_lists = extract_obs_seq(obs_seq_file)
     obs_array = np.loadtxt(truth_txt_file)
     Nobs = len(hx_lats)
+
+    if USE_CLEAR_SKY_MASK:
+        raw_mask = np.loadtxt(clear_sky_mask_file).reshape(-1)
+        if raw_mask.size != len(obs_array):
+            raise ValueError(f"clear-sky mask 大小 {raw_mask.size} 与真值观测数 {len(obs_array)} 不一致: {clear_sky_mask_file}")
+        clear_indices = np.where(raw_mask.astype(bool))[0]
+        obs_array = obs_array[clear_indices]
+        print(f"clear sky mode: 保留 {clear_indices.size} / {raw_mask.size} 个真值观测")
+        if len(obs_array) != Nobs:
+            raise ValueError(f"筛选后真值观测数 ({len(obs_array)}) 与 obs_seq 观测数 ({Nobs}) 不一致，请确认 obs_seq_file 是 clear 版")
     
     # ---------------------------------------------------------
     # 步骤 1 & 2：读取网格、KDTree 匹配并读取真实场
