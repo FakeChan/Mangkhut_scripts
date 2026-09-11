@@ -28,7 +28,7 @@ set -euo pipefail
 #==============================================================================
 # centralized experiment configuration
 #==============================================================================
-EXPERIMENT_MODE="${EXPERIMENT_MODE:-LACC}"
+EXPERIMENT_MODE="${EXPERIMENT_MODE:-STANDARD}"   #STANDARD or LACC
 
 CENTER_DAY="${CENTER_DAY:-10}"
 CENTER_HOUR="${CENTER_HOUR:-00}"
@@ -72,16 +72,16 @@ ADAPTIVE_NOISE_SEED="${ADAPTIVE_NOISE_SEED:-20260910}"
 # Observation vertical coordinate (pressure, Pa) written into obs_seq.out.
 # Must be BELOW the model surface pressure at the obs location, otherwise
 # DART fails the vertical conversion and rejects the obs (QC=8).
-HGT_OBS="${HGT_OBS:-100000}"
+HGT_OBS="${HGT_OBS:-85000}"
 
-RUN_TRUTH="${RUN_TRUTH:-1}"
-RUN_ENSEMBLE="${RUN_ENSEMBLE:-1}"
+RUN_TRUTH="${RUN_TRUTH:-0}"
+RUN_ENSEMBLE="${RUN_ENSEMBLE:-0}"
 RUN_OBS_CONVERT="${RUN_OBS_CONVERT:-1}"
 RUN_HX_MERGE="${RUN_HX_MERGE:-1}"
 RUN_TEXT_TO_OBS="${RUN_TEXT_TO_OBS:-1}"
 RUN_VALIDATION="${RUN_VALIDATION:-1}"
 
-OBS_SEQ_OUT_NAME="${OBS_SEQ_OUT_NAME:-obs_seq.out_kctest1_d01_10_00_00_LACC_ch4_clear02}"
+OBS_SEQ_OUT_NAME="${OBS_SEQ_OUT_NAME:-obs_seq.out_kctest1_d01_10_00_00_quantile_ch4_clear02}"
 OVERWRITE_OBS_SEQ="${OVERWRITE_OBS_SEQ:-1}"
 
 #==============================================================================
