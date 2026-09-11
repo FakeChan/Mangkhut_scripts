@@ -320,6 +320,8 @@ export HX_DIR
 export RAW_ENS_BT_DIR
 export ADAPTIVE_SST_REGION ADAPTIVE_SST_TARGET_ID ADAPTIVE_NOISE_SEED
 export ADAPTIVE_SST_MEMBER_PATTERN ADAPTIVE_SST_LAND_MASK_VAR ADAPTIVE_SST_LAND_MASK_WATER_ABOVE
+# weight-optimization mode: "joint_sst_field" (default) or "independent_sst_mean"
+export ADAPTIVE_LACC_OPTIMIZATION_MODE ADAPTIVE_LACC_OPTIMIZATION_SEED
 
 #==============================================================================
 # summary counters (defined up front so later stages stay consistent)
