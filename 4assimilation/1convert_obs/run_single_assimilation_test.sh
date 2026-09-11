@@ -34,6 +34,9 @@ CENTER_DAY="${CENTER_DAY:-10}"
 CENTER_HOUR="${CENTER_HOUR:-00}"
 CENTER_MIN="${CENTER_MIN:-00}"
 
+# central analysis-time tag derived from CENTER_* (drives adaptive SST default)
+CURRENT_TIME="${CENTER_DAY}_${CENTER_HOUR}_${CENTER_MIN}"
+
 ASSIM_CHANNEL="${ASSIM_CHANNEL:-4}"
 LACC_LAG_HOURS="${LACC_LAG_HOURS:-0 3 6}"
 
@@ -84,20 +87,27 @@ RUN_VALIDATION="${RUN_VALIDATION:-1}"
 OBS_SEQ_OUT_NAME="${OBS_SEQ_OUT_NAME:-obs_seq.out_kctest1_d01_10_00_00_quantile_ch4_clear02}"
 OVERWRITE_OBS_SEQ="${OVERWRITE_OBS_SEQ:-1}"
 
+# --- adaptive LACC SST background (target of the time-weight optimization) ---
+# Directory holding the analysis-time ensemble that enters DART, and the member
+# FILE NAME pattern inside it (compute_adaptive_LACC.py substitutes {domain}
+# and {mem}).  Both stay command-line-overridable; edit the defaults below to
+# point at another background, e.g. DART post-assim members under
+# .../DART/EAKF/obs_seq111 with
+#   ADAPTIVE_SST_MEMBER_PATTERN="preassim_member_{mem:04d}_{domain}.nc"
+# (that file set uses WRF XLAND 1=land/2=water, so you also need
+#   ADAPTIVE_SST_LAND_MASK_VAR=XLAND  ADAPTIVE_SST_LAND_MASK_WATER_ABOVE=1.5).
+BASE_DIR="/share/home/lililei1/kcfu/tc_mangkhut"
+ADAPTIVE_SST_BG_DIR="${ADAPTIVE_SST_BG_DIR:-${BASE_DIR}/4assimilation/0mem_all_time/cyclingDA/${CURRENT_TIME}}"
+ADAPTIVE_SST_MEMBER_PATTERN="${ADAPTIVE_SST_MEMBER_PATTERN:-firstguess_{domain}.mem{mem:03d}}"
+
 #==============================================================================
 # fixed paths
 #==============================================================================
-BASE_DIR="/share/home/lililei1/kcfu/tc_mangkhut"
 HX_DIR="${BASE_DIR}/3create_obs/hx_rttov"
 CONVERT_DIR="${BASE_DIR}/4assimilation/1convert_obs"
 TEXT_TO_OBS_RUN_DIR="${CONVERT_DIR}/run_dir"
 
 PYTHON_BIN="/share/home/lililei1/kcfu/anaconda/envs/wrf/bin/python"
-
-#==============================================================================
-# central time
-#==============================================================================
-CURRENT_TIME="${CENTER_DAY}_${CENTER_HOUR}_${CENTER_MIN}"
 
 #-----------------------------------------------------------------------------
 # guards
@@ -301,16 +311,11 @@ ADAPTIVE_LACC_DIR="${ADAPTIVE_LACC_DIR:-${ADAPTIVE_LACC_ROOT}/${CURRENT_TIME}_ch
 # succeeded (see the adaptive stage below).
 RAW_ENS_BT_DIR="${RAW_ENS_BT_DIR:-${ENS_BT_DIR}}"
 # SST target background = the analysis-time ensemble that actually enters
-# DART (driver_DART_cyclingDA.sh links 4assimilation/0mem_all_time/cyclingDA/<time>).
-# This is the INFLATED background; do NOT point it at the *_noinflatedOcean
-# copy unless that is what your filter run consumes.
-#
-# The member files are looked up as {ADAPTIVE_SST_MEMBER_PATTERN} (default
-# firstguess_{domain}.mem{mem:03d}); use e.g. "preassim_member_{mem:04d}_{domain}.nc"
-# to read DART pre/post-assim members.  The ocean test follows
+# DART.  ADAPTIVE_SST_BG_DIR and ADAPTIVE_SST_MEMBER_PATTERN defaults now live
+# in the central configuration block; here they are only FORWARDED (with the
+# land/water mask knobs) to compute_adaptive_LACC.py.  The ocean test follows
 # ADAPTIVE_SST_LAND_MASK_VAR / ADAPTIVE_SST_LAND_MASK_WATER_ABOVE: unset keeps
 # LANDMASK (water < 0.5); WRF XLAND (1=land,2=water) needs ...WATER_ABOVE=1.5.
-ADAPTIVE_SST_BG_DIR="${ADAPTIVE_SST_BG_DIR:-${BASE_DIR}/4assimilation/0mem_all_time/cyclingDA/${CURRENT_TIME}}"
 export HX_DIR
 export RAW_ENS_BT_DIR
 export ADAPTIVE_SST_REGION ADAPTIVE_SST_TARGET_ID ADAPTIVE_NOISE_SEED
