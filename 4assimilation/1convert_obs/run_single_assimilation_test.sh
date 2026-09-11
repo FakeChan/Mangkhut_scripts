@@ -17,6 +17,11 @@
 # Supports both LACC and STANDARD single-observation experiments via the
 # EXPERIMENT_MODE variable. Both modes apply the SAME clear-sky mask (from the
 # truth run) to every ensemble member.
+#
+# Optional: with EXPERIMENT_MODE=LACC and OptimizWeight=1, an adaptive
+# per-observation time-weighting step (compute_adaptive_LACC.py) runs between
+# the ensemble stage and obs conversion; downstream obs2DART_LACC.py /
+# merge_FO_in_one_file.py then consume its pre-filtered weighted products.
 #================================================================================
 set -euo pipefail
 
@@ -46,6 +51,23 @@ CLEAR_SKY_THRESHOLD="${CLEAR_SKY_THRESHOLD:-0.2}"
 CLEAR_SKY_MIN_FRACTION="${CLEAR_SKY_MIN_FRACTION:-}"
 
 OBS_ERR_STD="${OBS_ERR_STD:-0.5}"
+
+# Adaptive per-observation LACC time weighting (compute_adaptive_LACC.py).
+# Only valid with EXPERIMENT_MODE=LACC; default OFF. When ON, obs conversion
+# and Hx merge consume the pre-filtered adaptive products (q_kept rows +
+# original_obs_index + per-obs error variance) instead of the equal-weight
+# BT_LACC averages. Equal-weight LACC behavior is unchanged when OFF, and
+# STANDARD mode never uses it.
+OptimizWeight="${OptimizWeight:-0}"
+
+# SST area-mean target for the adaptive weights (user-confirmed obs-swath
+# box: lat_min lat_max lon_min lon_max; ocean cells only, cos(lat) weighted)
+ADAPTIVE_SST_REGION="${ADAPTIVE_SST_REGION:-13.2 15.0 147.2 149.1}"
+ADAPTIVE_SST_TARGET_ID="${ADAPTIVE_SST_TARGET_ID:-OM_TMP_LEVEL0}"
+# numpy PCG64 seed for the shared per-lag-time perturbation noise. This is a
+# NEW noise realization: the same integer seed does NOT reproduce the legacy
+# MATLAB randn stream of average_LACC_obs.m.
+ADAPTIVE_NOISE_SEED="${ADAPTIVE_NOISE_SEED:-20260910}"
 
 # Observation vertical coordinate (pressure, Pa) written into obs_seq.out.
 # Must be BELOW the model surface pressure at the obs location, otherwise
@@ -98,6 +120,22 @@ fi
 if [[ "${USE_CLEAR_SKY_MASK}" == "1" && "${RTTOV_SCATT}" != "0" ]]; then
     echo "ERROR: USE_CLEAR_SKY_MASK=1 requires RTTOV_SCATT=0 in this single-assimilation clear-sky workflow." >&2
     exit 1
+fi
+
+if [[ "${OptimizWeight}" != "0" && "${OptimizWeight}" != "1" ]]; then
+    echo "ERROR: OptimizWeight must be 0 or 1, got '${OptimizWeight}'" >&2
+    exit 1
+fi
+
+if [[ "${OptimizWeight}" == "1" ]]; then
+    if [[ "${EXPERIMENT_MODE}" != "LACC" ]]; then
+        echo "ERROR: OptimizWeight=1 is only supported with EXPERIMENT_MODE=LACC (got '${EXPERIMENT_MODE}')." >&2
+        exit 1
+    fi
+    if [[ "${USE_CLEAR_SKY_MASK}" != "1" ]]; then
+        echo "ERROR: OptimizWeight=1 requires USE_CLEAR_SKY_MASK=1: the adaptive products are pre-filtered by the unified LACC mask, so downstream row counts must match that filtering." >&2
+        exit 1
+    fi
 fi
 
 if [[ "${OBS_SEQ_OUT_NAME}" == */* ]]; then
@@ -251,6 +289,27 @@ if [[ "${EXPERIMENT_MODE}" == "LACC" ]]; then
 fi
 
 #==============================================================================
+# adaptive LACC (OptimizWeight=1) paths
+#==============================================================================
+ADAPTIVE_LACC_ROOT="${ADAPTIVE_LACC_ROOT:-${HX_DIR}/adaptive_LACC}"
+ADAPTIVE_LACC_DIR="${ADAPTIVE_LACC_DIR:-${ADAPTIVE_LACC_ROOT}/${CURRENT_TIME}_ch${ASSIM_CHANNEL}}"
+# RAW per-lag member Hx root (BT_<lag> subtrees).  Defaults to the mode's
+# ENS_BT_DIR *before* any repointing, so legacy ENS_BT_DIR overrides keep
+# working and the adaptive output directory can never be mistaken for the
+# raw input.  compute_adaptive_LACC.py reads ONLY this variable; ENS_BT_DIR
+# is repointed to the adaptive members tree only AFTER the compute step has
+# succeeded (see the adaptive stage below).
+RAW_ENS_BT_DIR="${RAW_ENS_BT_DIR:-${ENS_BT_DIR}}"
+# SST target background = the analysis-time ensemble that actually enters
+# DART (driver_DART.sh links 4assimilation/0mem_all_time/<time>). This is
+# the INFLATED background; do NOT point it at the *_noinflatedOcean copy
+# unless that is what your filter run consumes.
+ADAPTIVE_SST_BG_DIR="${ADAPTIVE_SST_BG_DIR:-${BASE_DIR}/4assimilation/0mem_all_time/${CURRENT_TIME}}"
+export HX_DIR
+export RAW_ENS_BT_DIR
+export ADAPTIVE_SST_REGION ADAPTIVE_SST_TARGET_ID ADAPTIVE_NOISE_SEED
+
+#==============================================================================
 # summary counters (defined up front so later stages stay consistent)
 #==============================================================================
 n_mask_rows=0
@@ -274,6 +333,11 @@ log_stage() {
 
 #-----------------------------------------------------------------------------
 # set expected_rows and mask statistics based on USE_CLEAR_SKY_MASK
+#
+# q_raw vs q_kept: the clear-sky mask file always has q_raw (NOBS) rows.
+# With OptimizWeight=1 the rows actually entering DART are the q_kept
+# pre-filtered adaptive rows, taken from original_obs_index.txt and required
+# to equal the mask-kept count.
 #-----------------------------------------------------------------------------
 validate_mask_and_set_expected_rows() {
     if [[ "${USE_CLEAR_SKY_MASK}" == "1" ]]; then
@@ -315,6 +379,19 @@ validate_mask_and_set_expected_rows() {
         fi
 
         expected_rows="${n_mask_one}"
+
+        if [[ "${OptimizWeight}" == "1" ]]; then
+            if [[ ! -s "${ADAPTIVE_LACC_DIR}/original_obs_index.txt" ]]; then
+                echo "ERROR: adaptive original_obs_index.txt missing or empty: ${ADAPTIVE_LACC_DIR}/original_obs_index.txt" >&2
+                exit 1
+            fi
+            n_adaptive_index=$(wc -l < "${ADAPTIVE_LACC_DIR}/original_obs_index.txt")
+            if [[ "${n_adaptive_index}" -ne "${n_mask_one}" ]]; then
+                echo "ERROR: adaptive original_obs_index has ${n_adaptive_index} rows (q_kept) but the unified LACC mask keeps ${n_mask_one} points; adaptive products and mask disagree." >&2
+                exit 1
+            fi
+            expected_rows="${n_adaptive_index}"
+        fi
     elif [[ "${USE_CLEAR_SKY_MASK}" == "0" ]]; then
         n_mask_rows="${NOBS}"
         n_mask_one="${NOBS}"
@@ -455,7 +532,45 @@ else
 fi
 
 #==============================================================================
-# stage 3: observation text conversion
+# stage 3: adaptive LACC time weighting (optional, LACC only)
+#==============================================================================
+if [[ "${OptimizWeight}" == "1" ]]; then
+    log_stage "Running adaptive LACC weighting: ${HX_DIR}/compute_adaptive_LACC.py"
+    # Explicit activation flag for the downstream converters: they must NOT
+    # enter the adaptive branch merely because ADAPTIVE_LACC_DIR happens to
+    # exist in the environment.
+    export ADAPTIVE_ACTIVE=1
+    export ADAPTIVE_LACC_DIR ADAPTIVE_SST_BG_DIR
+    "${PYTHON_BIN}" "${HX_DIR}/compute_adaptive_LACC.py" \
+        > "${LOG_DIR}/adaptive_lacc.log" 2>&1
+
+    for _adaptive_file in adaptive_lacc_weights.npz obs_error_variance.txt \
+                          original_obs_index.txt; do
+        if [[ ! -s "${ADAPTIVE_LACC_DIR}/${_adaptive_file}" ]]; then
+            echo "ERROR: adaptive LACC product missing or empty after compute step:" >&2
+            echo "       ${ADAPTIVE_LACC_DIR}/${_adaptive_file}" >&2
+            exit 1
+        fi
+    done
+    echo "Adaptive LACC products: ${ADAPTIVE_LACC_DIR}"
+
+    # Compute succeeded: only NOW point the downstream Hx-merge stage at the
+    # pre-filtered adaptive members tree (same memNNN/<sensor>/BT_LACC_<time>
+    # layout).  obs2DART_LACC.py reads the obs/variance/index files via
+    # ADAPTIVE_LACC_DIR; OBS_BT_DIR/CLEAR_SKY_MASK_FILE keep pointing at the
+    # original equal-weight products for the mask validation cross-checks.
+    ENS_BT_DIR="${ADAPTIVE_LACC_DIR}/members"
+    ENS_BT_SUBDIR="BT_LACC_${CURRENT_TIME}"
+    export ENS_BT_DIR ENS_BT_SUBDIR
+else
+    log_stage "Skipping adaptive LACC weighting (OptimizWeight=${OptimizWeight})"
+    # Neutralize any inherited activation flag: with OptimizWeight=0 the
+    # equal-weight flow must run even if ADAPTIVE_LACC_DIR is set outside.
+    unset ADAPTIVE_ACTIVE || true
+fi
+
+#==============================================================================
+# stage 4: observation text conversion
 #==============================================================================
 if [[ "${RUN_OBS_CONVERT}" == "1" ]]; then
     log_stage "Running observation conversion: ${OBS_CONVERT_SCRIPT}"
@@ -470,7 +585,7 @@ else
 fi
 
 #==============================================================================
-# stage 4: merge ensemble Hx into one file
+# stage 5: merge ensemble Hx into one file
 #==============================================================================
 if [[ "${RUN_HX_MERGE}" == "1" ]]; then
     log_stage "Running Hx merge: ${CONVERT_DIR}/merge_FO_in_one_file.py"
@@ -485,7 +600,7 @@ else
 fi
 
 #==============================================================================
-# stage 5: intermediate validation (before text_to_obs)
+# stage 6: intermediate validation (before text_to_obs)
 #==============================================================================
 if [[ "${RUN_VALIDATION}" == "1" ]]; then
     log_stage "Validating mask, filtered observations, and merged Hx"
@@ -495,7 +610,7 @@ else
 fi
 
 #==============================================================================
-# stage 6: text_to_obs
+# stage 7: text_to_obs
 #==============================================================================
 if [[ "${RUN_TEXT_TO_OBS}" == "1" ]]; then
 
@@ -647,12 +762,25 @@ if [[ "${EXPERIMENT_MODE}" == "LACC" ]]; then
     echo "LACC time count:             ${EXPECTED_LACC_COUNT}"
     echo "Clear-sky min fraction:      ${CLEAR_SKY_MIN_FRACTION:-2/3 (default)}"
     echo "Single-time obs error std:   ${OBS_ERR_STD} K"
-    echo "Final LACC obs error std:    ${LACC_FINAL_ERR_STD} K"
+    if [[ "${OptimizWeight}" == "1" ]]; then
+        echo "Final LACC obs error std:    per-obs (adaptive; see obs_error_variance.txt)"
+    else
+        echo "Final LACC obs error std:    ${LACC_FINAL_ERR_STD} K"
+    fi
 else
     echo "Single-time obs error std:   ${OBS_ERR_STD} K"
 fi
 echo "Ensemble member count:       ${ENS_SIZE}"
 echo "Observation input row count: ${obs_rows_shown}"
 echo "Merged Hx row x col count:   ${merged_shape_shown}"
+if [[ "${OptimizWeight}" == "1" ]]; then
+    echo "Adaptive LACC weighting:     on"
+    echo "Adaptive products dir:       ${ADAPTIVE_LACC_DIR}"
+    awk '
+        NR == 1 { min = $1; max = $1 }
+        { if ($1 < min) min = $1; if ($1 > max) max = $1 }
+        END { printf "Adaptive obs err std range: %.6f - %.6f K (per obs, sqrt of variance file)\n", sqrt(min), sqrt(max) }
+    ' "${ADAPTIVE_LACC_DIR}/obs_error_variance.txt"
+fi
 echo "Final obs_seq.out path:      ${OBS_SEQ_OUT_FILE}"
 echo "======================================================================"

@@ -130,6 +130,32 @@ if __name__ == "__main__":
         "LACC_TIMES_FILE",
         f"{obs_dir}/{obs_subdir}/LACC_times.txt"
     )
+
+    # Adaptive LACC (OptimizWeight=1): observations were already
+    # position-filtered and time-weighted by compute_adaptive_LACC.py, whose
+    # products live in ADAPTIVE_LACC_DIR.  This converter still parses the
+    # ORIGINAL full-length profile with this file's own RTTOV-standard
+    # layout (locations 186 / angles 188, step 185; the RTTOV-scatt layout
+    # is different and is parsed by obs2DART_rttov_scatt.py -- adaptive is
+    # NOT wired into that version).  The clear-sky mask must NOT be applied
+    # again here; rows are paired through original_obs_index instead.
+    #
+    # Activation is EXPLICIT: the driver exports ADAPTIVE_ACTIVE=1 together
+    # with ADAPTIVE_LACC_DIR only when EXPERIMENT_MODE=LACC and
+    # OptimizWeight=1.  A stray ADAPTIVE_LACC_DIR in the environment alone
+    # must NOT switch the equal-weight flow to the adaptive branch.
+    adaptive_active = os.environ.get("ADAPTIVE_ACTIVE", "") == "1"
+    adaptive_dir = os.environ.get("ADAPTIVE_LACC_DIR", "") if adaptive_active else ""
+    if adaptive_dir:
+        obs_file = os.path.join(
+            adaptive_dir, f"obs_{domain}_ch{channel}_totalline_withpert.txt"
+        )
+        original_obs_index_file = os.path.join(
+            adaptive_dir, "original_obs_index.txt"
+        )
+        obs_error_variance_file = os.path.join(
+            adaptive_dir, "obs_error_variance.txt"
+        )
     #=======================================================================================
     #parameters read into DART
 
@@ -153,32 +179,87 @@ if __name__ == "__main__":
     month=9
     second=0
 
-    # clear-sky mask switch
+    # clear-sky mask switch (equal-weight LACC path only; the adaptive path
+    # receives already-filtered rows via original_obs_index)
     use_clear_sky_mask = (
         os.environ.get("USE_CLEAR_SKY_MASK", "1") == "1"
     )
 
-    clear_sky_indices = load_clear_sky_indices(
-        clear_sky_mask_file,
-        nobs,
-        use_clear_sky_mask,
-    )
+    if adaptive_dir:
+        # 1-based original position numbers of the q_kept retained rows
+        selected_indices = (
+            np.loadtxt(original_obs_index_file, dtype=int, ndmin=1) - 1
+        )
+        if selected_indices.size == 0:
+            raise ValueError(
+                f"original obs index file is empty: {original_obs_index_file}"
+            )
+        if not np.all(np.diff(selected_indices) > 0):
+            raise ValueError(
+                f"original obs index must be strictly increasing (original "
+                f"order, 1-based): {original_obs_index_file}"
+            )
+        if selected_indices.min() < 0 or selected_indices.max() >= nobs:
+            raise ValueError(
+                f"original obs index out of range 1..{nobs}: "
+                f"{original_obs_index_file}"
+            )
+
+        # obs_error_variance.txt holds VARIANCES (sigma^2, per task
+        # interface).  The obs_err column of the DART text input is a
+        # STANDARD DEVIATION: text_to_obs.f90 stores
+        # set_obs_def_error_variance(obs_def, obs_err * obs_err), so we take
+        # the square root here; writing the variance directly would put
+        # sigma^4 into obs_seq.out.
+        error_variance = np.loadtxt(obs_error_variance_file, ndmin=1)
+        if error_variance.size != selected_indices.size:
+            raise ValueError(
+                f"obs error variance has {error_variance.size} rows, expected "
+                f"{selected_indices.size}: {obs_error_variance_file}"
+            )
+        if np.any(error_variance <= 0) or not np.all(np.isfinite(error_variance)):
+            raise ValueError(
+                f"obs error variance must be positive and finite: "
+                f"{obs_error_variance_file}"
+            )
+        obs_err_rows = np.sqrt(error_variance)
+        print(f"Adaptive LACC input dir: {adaptive_dir}")
+        print(f"Adaptive LACC kept rows: {selected_indices.size} / {nobs}")
+        print(
+            "Per-obs error std from variance file: min "
+            f"{obs_err_rows.min():.8f}, max {obs_err_rows.max():.8f} K "
+            "(variance -> std because text_to_obs squares the text value)"
+        )
+    else:
+        clear_sky_indices = load_clear_sky_indices(
+            clear_sky_mask_file,
+            nobs,
+            use_clear_sky_mask,
+        )
+        selected_indices = clear_sky_indices
 
     # LACC observation error: single-time sigma / sqrt(number of LACC times)
+    # (equal-weight path only; the adaptive path uses per-obs variances above)
     n_lacc_times = read_lacc_time_count(lacc_times_file)
-    obs_err = obs_err_single / math.sqrt(n_lacc_times)
+    if not adaptive_dir:
+        obs_err = obs_err_single / math.sqrt(n_lacc_times)
 
-    print(f"Single-time obs error std: {obs_err_single:.8f} K")
-    print(f"Number of LACC times: {n_lacc_times}")
-    print(f"LACC obs error std: {obs_err:.8f} K")
+        print(f"Single-time obs error std: {obs_err_single:.8f} K")
+        print(f"Number of LACC times: {n_lacc_times}")
+        print(f"LACC obs error std: {obs_err:.8f} K")
 
     obs=np.loadtxt(obs_file)
     angles=read_every_nth_line(para_file, start_line=188, step=185)
     locations=read_every_nth_line(para_file, start_line=186, step=185)
 
-    if len(obs) != nobs:
+    # adaptive obs file has q_kept rows; the equal-weight file has q_raw rows
+    expected_obs_rows = (
+        selected_indices.size if adaptive_dir else nobs
+    )
+    if len(obs) != expected_obs_rows:
         raise ValueError(
-            f"observation count {len(obs)} does not match nobs {nobs}: {obs_file}"
+            f"observation count {len(obs)} does not match expected "
+            f"{expected_obs_rows}: {obs_file}"
         )
     if len(angles) != nobs:
         raise ValueError(
@@ -199,13 +280,17 @@ if __name__ == "__main__":
              "{:11.1f} {:11.1f}" + \
              "{:5d} {:5d} {:5d} {:5d}"
     data=[]
-    for i in clear_sky_indices:
-        obs_value=obs[i]
+    for row in range(len(selected_indices)):
+        i = selected_indices[row]
+        # adaptive rows are pre-filtered: obs[0..q_kept-1] pairs with the
+        # profile entry at ORIGINAL position i (never "first q_kept lines")
+        obs_value = obs[row] if adaptive_dir else obs[i]
         sat_ze=float(angles[i].split()[0])
         sat_az=float(angles[i].split()[1])
         lat=float(locations[i].split()[1])
         lon=float(locations[i].split()[2])
-        data.append((obstype,lat,lon,hgt_obs,year,month,intday,inthour,intmin,second,obs_value,obs_err,sat_az,sat_ze,platform,sat,sensor,channel))
+        obs_err_value = obs_err_rows[row] if adaptive_dir else obs_err
+        data.append((obstype,lat,lon,hgt_obs,year,month,intday,inthour,intmin,second,obs_value,obs_err_value,sat_az,sat_ze,platform,sat,sensor,channel))
     #sequnce: obstype(int),lat,lon,height of obs(hPa),year,month,day,hour,minute,second,
     #obs_value,obs_error,sat_az,sat_ze,platform_id, sat_id, sensor_id, channel
 

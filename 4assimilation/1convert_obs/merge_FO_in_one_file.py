@@ -55,7 +55,12 @@ if __name__ == "__main__":
     nobs = int(os.environ.get("NOBS", "676"))
     memlist = list(np.arange(1, ens_size + 1))
 
-    TOP_DIR = "/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/1convert_obs"
+    # base dir for the work symlinks and the default merged output
+    # (overridable for off-cluster test runs; default matches the cluster path)
+    TOP_DIR = os.environ.get(
+        "CONVERT_TOP_DIR",
+        "/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/1convert_obs"
+    )
     BT_DIR = os.environ.get(
         "ENS_BT_DIR",
         "/share/home/lililei1/kcfu/tc_mangkhut/3create_obs/hx_rttov/4ens_BT"
@@ -86,11 +91,29 @@ if __name__ == "__main__":
         )
         out_fname = os.environ.get("MERGED_FO_FILE", out_fname_default)
 
-        clear_sky_indices = load_clear_sky_indices(
-            mask_file, nobs, use_clear_sky_mask
-        )
+        # Adaptive LACC (OptimizWeight=1): per-member weighted Hx files were
+        # already position-filtered by compute_adaptive_LACC.py (q_kept rows,
+        # original order).  The raw q_raw-length clear-sky mask must NOT be
+        # applied again.  The driver points ENS_BT_DIR/ENS_BT_SUBDIR at the
+        # adaptive members/ tree only AFTER the compute step succeeded, and
+        # exports ADAPTIVE_ACTIVE=1 only in that case: a stray
+        # ADAPTIVE_LACC_DIR in the environment alone must NOT switch the
+        # equal-weight flow to the adaptive branch.
+        adaptive_active = os.environ.get("ADAPTIVE_ACTIVE", "") == "1"
+        adaptive_dir = os.environ.get("ADAPTIVE_LACC_DIR", "") if adaptive_active else ""
+        prefiltered = bool(adaptive_dir)
+
+        if prefiltered:
+            clear_sky_indices = None
+            print(f"Adaptive LACC pre-filtered Hx input: {adaptive_dir} "
+                  f"(clear-sky mask NOT re-applied)")
+        else:
+            clear_sky_indices = load_clear_sky_indices(
+                mask_file, nobs, use_clear_sky_mask
+            )
 
         os.chdir(work_dir)
+        prefiltered_len = None
         for i, mem in enumerate(memlist):
             formatted_i = '{:03d}'.format(mem)
             in_fname = f'{ens_fname_prefix}{formatted_i}'
@@ -102,17 +125,30 @@ if __name__ == "__main__":
                     f"member Hx file missing (not silently skipped): {work_dir}/{in_fname}"
                 )
             arr = np.loadtxt(in_fname, dtype='str')
-            if arr.size != nobs:
-                raise ValueError(
-                    f"member Hx raw row count {arr.size} does not match nobs "
-                    f"{nobs}: {in_fname}"
-                )
-            arr = arr[clear_sky_indices]
-            if arr.size != len(clear_sky_indices):
-                raise ValueError(
-                    f"member Hx filtered row count {arr.size} does not match "
-                    f"expected {len(clear_sky_indices)}: {in_fname}"
-                )
+            if prefiltered:
+                if arr.ndim != 1:
+                    raise ValueError(
+                        f"adaptive member Hx must be one value per line: {in_fname}"
+                    )
+                if prefiltered_len is None:
+                    prefiltered_len = arr.size
+                elif arr.size != prefiltered_len:
+                    raise ValueError(
+                        f"adaptive member Hx row count {arr.size} differs from "
+                        f"member 001 count {prefiltered_len}: {in_fname}"
+                    )
+            else:
+                if arr.size != nobs:
+                    raise ValueError(
+                        f"member Hx raw row count {arr.size} does not match nobs "
+                        f"{nobs}: {in_fname}"
+                    )
+                arr = arr[clear_sky_indices]
+                if arr.size != len(clear_sky_indices):
+                    raise ValueError(
+                        f"member Hx filtered row count {arr.size} does not match "
+                        f"expected {len(clear_sky_indices)}: {in_fname}"
+                    )
             output.append(arr)
 
         if len(output) != ens_size:
@@ -122,16 +158,24 @@ if __name__ == "__main__":
             )
 
         tmp = np.array(output).transpose()  # make sure structure is [data_num,ens_size]
-        if tmp.shape != (len(clear_sky_indices), ens_size):
+        expected_shape = (
+            (prefiltered_len, ens_size) if prefiltered
+            else (len(clear_sky_indices), ens_size)
+        )
+        if tmp.shape != expected_shape:
             raise ValueError(
                 f"merged matrix shape {tmp.shape} does not match expected "
-                f"{(len(clear_sky_indices), ens_size)}"
+                f"{expected_shape}"
             )
         np.savetxt(out_fname, tmp, delimiter=' ', fmt='%s')
 
-        print(f"Clear-sky mask file: {mask_file}")
-        print(f"Raw grid point count: {nobs}")
-        print(f"Retained grid point count: {len(clear_sky_indices)}")
+        if prefiltered:
+            print(f"Adaptive LACC Hx source: {adaptive_dir}")
+            print(f"Pre-filtered grid point count (q_kept): {prefiltered_len}")
+        else:
+            print(f"Clear-sky mask file: {mask_file}")
+            print(f"Raw grid point count: {nobs}")
+            print(f"Retained grid point count: {len(clear_sky_indices)}")
         print(f"Ensemble member count: {ens_size}")
         print(f"Merged matrix shape: {tmp.shape}")
         print(f"Merged Hx file: {out_fname}")
