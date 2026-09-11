@@ -304,10 +304,17 @@ RAW_ENS_BT_DIR="${RAW_ENS_BT_DIR:-${ENS_BT_DIR}}"
 # DART (driver_DART_cyclingDA.sh links 4assimilation/0mem_all_time/cyclingDA/<time>).
 # This is the INFLATED background; do NOT point it at the *_noinflatedOcean
 # copy unless that is what your filter run consumes.
+#
+# The member files are looked up as {ADAPTIVE_SST_MEMBER_PATTERN} (default
+# firstguess_{domain}.mem{mem:03d}); use e.g. "preassim_member_{mem:04d}_{domain}.nc"
+# to read DART pre/post-assim members.  The ocean test follows
+# ADAPTIVE_SST_LAND_MASK_VAR / ADAPTIVE_SST_LAND_MASK_WATER_ABOVE: unset keeps
+# LANDMASK (water < 0.5); WRF XLAND (1=land,2=water) needs ...WATER_ABOVE=1.5.
 ADAPTIVE_SST_BG_DIR="${ADAPTIVE_SST_BG_DIR:-${BASE_DIR}/4assimilation/0mem_all_time/cyclingDA/${CURRENT_TIME}}"
 export HX_DIR
 export RAW_ENS_BT_DIR
 export ADAPTIVE_SST_REGION ADAPTIVE_SST_TARGET_ID ADAPTIVE_NOISE_SEED
+export ADAPTIVE_SST_MEMBER_PATTERN ADAPTIVE_SST_LAND_MASK_VAR ADAPTIVE_SST_LAND_MASK_WATER_ABOVE
 
 #==============================================================================
 # summary counters (defined up front so later stages stay consistent)

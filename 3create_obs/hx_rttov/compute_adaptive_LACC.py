@@ -29,8 +29,10 @@ inside kept positions):
      error VARIANCE, weights (.npz) and diagnostics.
 
 Target (version 1): area-mean SST over a user-specified ocean box,
-s_i = sum_j a_j SST_{i,j}(t_analysis), from the same firstguess_d01.memNNN
-background that enters DART.  Weights maximize
+s_i = sum_j a_j SST_{i,j}(t_analysis), from the analysis-time background
+that enters DART (default member naming firstguess_d01.memNNN, configurable
+via sst_member_pattern / sst_land_mask_water_above for e.g. DART
+preassim_member_0001_d01.nc members with an XLAND land/water field).  Weights maximize
 (c_l w)^2 / (w^T S_l w) with
   c_l = s'^T Y'_l / (N-1),   S_l = Y'_l^T Y'_l / (N-1) + R_l
 subject to w >= 0, sum(w) = 1.  This is a numerical grid-search
@@ -110,6 +112,14 @@ class Config:
     sst_lat_var: str = "XLAT"
     sst_lon_var: str = "XLONG"
     sst_land_mask_var: str = "LANDMASK"  # 1 = land, 0 = water
+    # member file NAME pattern inside sst_bg_dir.  {domain} and {mem} are
+    # substituted (mem is the raw 1-based member integer); use {mem:04d} for
+    # zero padding.  The legacy default reproduces firstguess_d01.memNNN.
+    sst_member_pattern: str = "firstguess_{domain}.mem{mem:03d}"
+    # water criterion.  None keeps the legacy LANDMASK convention (water where
+    # mask < 0.5).  For WRF XLAND (1 = land, 2 = water) set e.g. 1.5: water
+    # where mask >= 1.5.
+    sst_land_mask_water_above: float | None = None
 
     # --- optimizer ---
     coarse_step_for_t: tuple[tuple[int, float], ...] = (
@@ -144,6 +154,9 @@ ENV_MAPPING: dict[str, str] = {
     "obs_err_std": "OBS_ERR_STD",
     "clear_sky_min_fraction": "CLEAR_SKY_MIN_FRACTION",
     "sst_target_id": "ADAPTIVE_SST_TARGET_ID",
+    "sst_member_pattern": "ADAPTIVE_SST_MEMBER_PATTERN",
+    "sst_land_mask_var": "ADAPTIVE_SST_LAND_MASK_VAR",
+    "sst_land_mask_water_above": "ADAPTIVE_SST_LAND_MASK_WATER_ABOVE",
     "noise_seed": "ADAPTIVE_NOISE_SEED",
     "mask_crosscheck": "ADAPTIVE_LACC_MASK_CROSSCHECK",
 }
@@ -173,6 +186,8 @@ def load_config() -> Config:
             elif isinstance(f.default, int):
                 values[f.name] = int(raw)
             elif isinstance(f.default, float):
+                values[f.name] = float(raw)
+            elif f.name == "sst_land_mask_water_above":
                 values[f.name] = float(raw)
             else:
                 values[f.name] = raw
@@ -445,7 +460,9 @@ def load_sst_target(cfg: Config) -> np.ndarray:
     ref_member = -1
     ref_grid: tuple[np.ndarray, np.ndarray] | None = None
     for k, mem in enumerate(members):
-        path = cfg.sst_bg_dir / f"firstguess_{cfg.domain}.mem{mem:03d}"
+        path = cfg.sst_bg_dir / cfg.sst_member_pattern.format(
+            domain=cfg.domain, mem=int(mem)
+        )
         if not path.is_file():
             raise FileNotFoundError(f"SST background member file missing: {path}")
         with nc.Dataset(path) as ds:
@@ -476,7 +493,10 @@ def load_sst_target(cfg: Config) -> np.ndarray:
             (grid_lat >= lat_min) & (grid_lat <= lat_max)
             & (grid_lon >= lon_min) & (grid_lon <= lon_max)
         )
-        ocean = box & (land < 0.5)
+        if cfg.sst_land_mask_water_above is None:
+            ocean = box & (land < 0.5)          # legacy LANDMASK: 0 = water, 1 = land
+        else:
+            ocean = box & (land >= cfg.sst_land_mask_water_above)  # XLAND: 1=land, 2=water
         n_box = int(box.sum())
         if n_box < 10:
             raise ValueError(
