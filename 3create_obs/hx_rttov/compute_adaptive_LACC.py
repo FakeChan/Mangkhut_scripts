@@ -213,7 +213,7 @@ def load_config() -> Config:
         base = os.environ.get("ADAPTIVE_BASE_DIR", "/share/home/lililei1/kcfu/tc_mangkhut")
         cfg = _replace(
             cfg,
-            sst_bg_dir=Path(base) / "4assimilation" / "0mem_all_time" / cfg.center_time,
+            sst_bg_dir=Path(base) / "4assimilation" / "0mem_all_time" / "cyclingDA" / cfg.center_time,
         )
     if cfg.output_dir is None:
         cfg = _replace(
