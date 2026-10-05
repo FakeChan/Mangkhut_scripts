@@ -14,6 +14,11 @@
 | `verify_02_flux_error_budget.py` | 诊断二:通量误差变化的精确分解(交叉项/平方项/闭合残差) |
 | `verify_03_fixed_atmosphere_flux.py` | 诊断三:固定大气海温替换(阶段 A 重建一致性 + 阶段 B 条件替换) |
 | `verify_synthetic.py` | 合成数据生成器(SYNTHETIC ONLY,固定种子,内存数据,不触任何真实文件) |
+| `verify_04_initial_handoff.py` | 诊断四:初值传递核验(B→A→I,及独立 F0;d_assim/d_handoff/d_pair 三组差值严格分名);默认真实模式(与 01–03 一致),真实 B/A/I 路径需在其配置区确认 |
+| `verify04_readers.py` | 小型 NetCDF 读取适配:按维度名称与 Times 属性定时间、网格一致性校验、无插值 |
+| `caliber_link.py` | 模块 B:pathway vs verify_diag 口径对照表与连接兼容性判定(unknown 默认) |
+| `REVIEW_SOURCES_AND_CALIBER.md` | 代码层审查:四阶段来源关系(含证据行号)、update_tsk_from_omtmp 审查、口径差异 |
+| `run_verify_diag.sh` | LSF 串行作业提交脚本(RUN_VERIFY01/02/03 开关;verify_04 未纳入,单独运行) |
 | `verify_smoke_test.py` | 两层冒烟测试 + 三个诊断的合成全流程测试 |
 | `outputs/SYNTHETIC_*/` | 本次合成测试的全部输出(明细 CSV、汇总 CSV、图件、逐点场 npz、列说明) |
 | `TEST_RECORD.md` | 本次测试记录(解释器、实际测试项、通过项、未验证项) |
@@ -264,6 +269,43 @@ dSE_T = (T_s-T_NR)^2 - (T_w-T_NR)^2(默认 T = TSK,阈值 = sst_se_tol,单位 K^
 真实路径线索(本次禁止访问,仅作配置记录):预报
 `/scratch/lililei1/kcfu/tc_mangkhut/cycle_test/{试验}/{方法}/{成员}/wrfout_d02_时间`;
 NR `/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/2domain/wrfout_d02_时间`。
+
+### 初值传递核验(verify_04)
+
+核验"同化前背景 B → 同化后分析 A → WRF 实际启动状态 I"的来源关系与数值差异,
+F0(0h 预报输出)为独立阶段只做描述性比较。三组差值字段名严格区分:
+
+    d_assim   = A - B   (stage_pair=A-B;同化增量)
+    d_handoff = I - A   (stage_pair=I-A;交接差,或 I - M(A))
+    d_pair    = X_strong - X_weak(逐阶段;initial_pair 表,stage 列)
+
+- 传递映射 M = `ncks_updateDARTvar.sh` 变量清单(MU,OM_TMP,OM_U,OM_V,OM_S,
+  P,PH,QVAPOR,THM,U,V,W):仅这些变量把分析值带入启动状态;M 外变量
+  (如 TSK)的 d_handoff 标注 `mapping_unverified`,数值照常输出,
+  不判通过/失败——"OM_TMP 改变而 TSK 未变"可能是设计行为(update_tsk
+  流程未启用),不是错误;
+- 读取按维度名称与 Times 属性定位(缺失时才回退显式记录号);形状或
+  XLAT/XLONG 不一致即 shape_mismatch/grid_mismatch,**无插值掩盖**;
+- 每项输出差异均值/RMS(差值均方根,非标准差)/最大绝对差/超容差计数与
+  比例/有效与缺测点数/来源与阶段/单位/映射依据;
+- 真实模式 B/A/I 路径默认未配置(文件名推断见
+  REVIEW_SOURCES_AND_CALIBER.md,confirmed=False):使用前逐项确认并填
+  `STAGE_SOURCE_DEFAULTS`,未配置的阶段只跳过依赖它的比较;
+- 输出:`verify04_source_manifest.csv`(来源清单)、
+  `verify04_pairwise_checks.csv`(阶段差)、`verify04_initial_pair_checks.csv`
+  (强弱初值差)、`verify04_coverage.csv`(预期/实际/缺失)、
+  `verify04_status.csv`、`caliber_compat_table.csv`(口径判定)。
+
+### 口径衔接(caliber_link)
+
+`caliber_compat_table.csv` 逐维对照 pathway 与 verify_diag(中心定义、空间
+支持、时次集合、海洋掩膜、离线通量的 SST/大气来源、指标语义等),判定
+`value_by_value / parallel_evidence / not_comparable / unknown` 四档,默认
+unknown。`check_joinable()` 对两张结果表按键逐组判定:口径全同才可逐值
+比较;块平均与逐点、不同中心、不同 SST 来源一律 not_comparable;元数据
+缺失不默认 compatible;重复键标记 duplicate_keys;成员前导零不做静默归一。
+两套离线通量结果(pathway 旧口径与 verify03)是**两个不同的替换试验**,
+只能并列展示。
 
 ## 五、本次合成测试结论的边界
 

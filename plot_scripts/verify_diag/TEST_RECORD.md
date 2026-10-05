@@ -398,3 +398,196 @@ actual_response_below_floor,只影响比率不改原始 RMS);
 
 仍未验证:物理实现与 WRF Fortran 逐公式等价性、真实 namelist、
 NR 时间插值物理误差、真实网格与变量维度。
+
+
+---
+
+# 第七轮:初值传递核验与口径衔接(2026-10-03)
+
+按缩范围任务书执行:不再建设完整海洋—大气响应诊断,复用 pathway 与
+verify_diag,只补初值传递核验(模块 A)与统计口径衔接(模块 B)。
+
+## 代码层审查结论(详见 REVIEW_SOURCES_AND_CALIBER.md)
+
+- 四阶段来源(6mem 试验,证据为脚本行号):B=`firstguess_d0X.memNNN`
+  (链接为 wrfinput 供 DART 读取);A=`output_d0X.memNNN`(filter 产物,
+  update_ocean=1 时先被 inflatedOcean 的海洋变量覆盖);
+  I=ncks 合并后的 firstguess 直接 mv 为 wrfinput(再经 update_wrf_bc 与
+  ad_omini 的 OM_TINI/OM_SINI 廓线重置);F0=wrfout 0h(独立阶段)。
+- 传递映射 M=ncks_updateDARTvar.sh 的 12 变量清单;M 外变量在 I 中保持
+  背景值;ad_omini 只动 OM_TINI/OM_SINI;TSK 无移植代码。
+- `update_tsk_from_omtmp.py`:改写 firstguess 的 TSK←OM_TMP 表层
+  (XLAND==2,50 成员,0mem_all_time 试验目录),**仓库内无调用者**,
+  是否用于当前 6mem 试验未知——"OM_TMP 变而 TSK 不变"不判错误。
+- 口径差异 8 项(块平均 vs 逐点、强弱平均中心 vs NR 中心、时次 8 vs 13、
+  dom0≠A−B、离线通量 SST 来源与大气时刻不同、corr/slope≠技巧、
+  XLAND vs LANDMASK、成员前导零)全部进入对照表与兼容性工具。
+
+## 新增/修改文件
+
+| 文件 | 内容 |
+|---|---|
+| `verify_04_initial_handoff.py` | 模块 A 入口:合成模式自带合成 B/A/I/F0 NetCDF 生成;三组差值(d_assim/d_handoff/d_pair)逐成员逐时次;五张输出表 |
+| `verify04_readers.py` | 读取适配:按维度名称定位(含空间维归一化)、Times 属性匹配 + 显式记录号回退、网格一致性、单位元数据、只读 |
+| `caliber_link.py` | 模块 B:CALIBER_DIMENSIONS 对照表 + check_joinable 兼容性判定(value_by_value/parallel_evidence/not_comparable/unknown/duplicate_keys) |
+| `verify_common.py` | 新增 `difference_stats`(差值均值/RMS/最大绝对差/超容差计数)、`decode_wrf_time_stamp`、`grids_identical`(公开包装,provider 复用) |
+| `REVIEW_SOURCES_AND_CALIBER.md` | 上述审查文档 |
+| 冒烟测试 | 新增 4 项(手算残差/时刻/换序/单位;阶段缺失与字段命名;口径判定;真实模式来源防呆)+ 导入清单扩充 |
+
+## 测试结果
+
+- 解释器 `/Users/kcfu/miniforge3/envs/wrf/bin/python -B`;**48/48 通过**
+  (44 项原有无回归 + 4 项新增),覆盖任务书第八节全部 15 类场景:
+  残差手算(A=B/I=A;部分保留;正负抵消均值零 RMS 非零)、强弱背景不同
+  (d_pair 与 d_assim 分名)、OM_TMP 变而 TSK 不变(mapping_unverified 非错误)、
+  阶段缺失跳过、错时刻/同形不同网格/单位缺失/映射未知、维度换序归一化、
+  多时间记录与 Times 缺失回退、空掩膜/全 NaN/容差判定、coverage 统计、
+  CSV 重复键/前导零/元数据缺失、块平均 vs 逐点不误报可比、
+  合成端到端(字段/状态/来源追溯)、导入无副作用、防呆开关。
+- 端到端抽查:d_assim OM_TMP 均值 = 5/48(手算吻合)、d_handoff = 0、
+  大气一致性标记正确、SST 缺失行计数精确(936)、coverage expected 完整。
+
+## 未解决与后续
+
+- B/A/I 的真实路径为文件名推断,B/A/I 默认未配置(防呆):真实运行前需
+  在服务器确认目录布局(尤其 firstguess 的原始来源与 post_anal_dir)、
+  OM_TINI 与 OM_TMP 的变量关系、isftcflx;
+- pathway 块平均无法恢复逐点量,若需逐点对照需重新提取真实逐点场
+  (后续待办,本次不做);
+- 两套离线通量结果只能并列展示;数学解释由 Codex 另行审查。
+
+
+---
+
+# 第八轮:诊断四数学与数据契约审查修复(2026-10-04)
+
+针对 `diagnostic_reports/20261004_verify04_math_review/REVIEW.md` 的 5×P1 +
+3×P2 逐项修复;修复顺序按审查建议(先 1–5,再 6–8,最后文档与测试)。
+
+## P1 修复
+
+1. **单位检查进入比较前提**:主流程新增 `_unit_check`——两侧实际 units 都
+   存在且与配置一致才计算;缺失 → unit_unknown、不符 → unit_mismatch,
+   跳过并保留 unit_left/unit_right 原始单位;隐式换算默认禁用
+   (UNIT_ALIASES 须显式登记,默认空)。审查反例(B=K、A=degC)端到端回归:
+   status=unit_mismatch、数值 NaN、I-A 行结论 not_concluded:unit_mismatch。
+2. **基础掩膜与数值有效性分离**:新增 `verify_common.stage_difference_stats`
+   ——base_mask 不随缺测收缩;相减前按侧识别缺失与 |x|>=1e30 填充
+   (n_missing_left/right、n_fill),相消填充不再伪装零差。审查反例端到端:
+   24/48 点 NaN → n_base=48 不收缩;n_fill=12 显式暴露。
+3. **起报时次契约**:新增 INIT_TIME_NAME/CYCLE_ID——B/A/I 与 F0 只在起报
+   循环有效时间核验,lead time 不充当 cycle;无 Times 文件的回退记录号改为
+   逐阶段显式配置(time_record,缺省 None,不盲目取第 0 条);读取器新增
+   time_ambiguous(重复 Times)/invalid_time_record(负号)/
+   no_time_dimension 规则。比较只在起报时次上(回归断言)。
+4. **网格与字段同记录共读**:read_stage_grid 绑定同一时间记录与维度名称
+   (含归一化);grids_match 新增位置对应(坐标形状=字段形状)、NaN 坐标
+   拒绝(grid_contains_nan);交错变量(U/V)显式 grid_unverified_staggered,
+   不用质量点坐标冒充交错核验。审查反例(A 网格漂移 1°)端到端回归。
+5. **来源/映射真正约束结论**:handoff_conclusion 列与 status 分离——
+   not_concluded_source_unconfirmed / mapping_unknown(弱试验 ncks_air.sh
+   本地缺失,映射未知)/ variable_outside_mapping /
+   mapping_inferred_not_confirmed / consistent_within_tolerance /
+   differs_outside_tolerance;映射逐试验定义(MAPPING_SPECS:强试验=
+   ncks.sh 清单,弱试验=未知),不共用固定 M;来源确认逐阶段记录。
+   数值(status=ok)与结论(需确认)分离,未确认时不作一致性结论。
+
+## P2 修复
+
+6. **兼容性判定必需语义**:check_joinable 新增 REQUIRED_SEMANTIC_FIELDS
+   (experiment_or_cycle/valid_time/variable/unit/vertical_layer/
+   metric_family/spatial_support)——未覆盖即全部 unknown,不默认放行;
+   T2 vs Q2(变量/单位不同)同键判 not_comparable(端到端回归);
+   静态口径表更正:成员集合为动态发现(非固定 6 成员事实)、dom0 首先对应
+   d_pair@F0。
+7. **单列键与未匹配**:键统一规范元组(字符串不再被拆成首字符、整数不报
+   TypeError);新增 unmatched_keys() 显式报告 left_only/right_only;
+   前导零差异仍不静默归一。
+8. **清单与快照**:manifest 逐读取请求记录 variable/layer/unit_expected/
+   unit_found/unit_matches/dims_order/time_record_used,未配置阶段也出行;
+   新增 verify04_config_snapshot.json(阶段路径/确认标记/记录号、变量与
+   容差、逐试验映射、单位别名、起报时次契约);读取请求键含层号防覆盖。
+
+## 文档更正
+
+- dom0 恒等式更正:dom0 = (B_s−B_w) + [(A_s−B_s)−(A_w−B_w)];共同背景且
+  弱试验无更新时才等于强试验同化增量;dom0 首先对应 d_pair@F0。
+- OM_TINI/OM_SINI 重置 ≠ 已证明重置 OM_TMP 廓线(需模式初始化证据)。
+- pathway 成员集合为动态发现,不写成已验证事实。
+
+## 测试结果
+
+- **52/52 通过**(50 项前有 + 2 项新增;其中多项为审查反例的端到端回归:
+  单位不匹配、双侧 NaN/填充、网格漂移、T2 vs Q2、单列键、必需语义缺失)。
+- 原有公式(差值均值/RMS/最大绝对差、强减弱符号、SST 子集筛选)保持不变。
+- 仍未验证:B/A/I 真实路径与映射的服务器确认;真实数据的初值核验结果。
+
+
+---
+
+# 第九轮:诊断四第二轮复核修复(2026-10-04)
+
+针对 `diagnostic_reports/20261004_verify04_math_review_round2/REVIEW.md`
+的 R1(P1)与 R2–R7(P2)逐项修复。
+
+## 修复内容
+
+- **R1 [P1] 未核验网格不得得到一致性结论**:`grids_match` 改为三元组
+  (allowed, detail, grid_verified);交错网格 allowed=True 但
+  grid_verified=False。`_handoff_conclusion` 新增前提链:数值可计算 →
+  **网格已核验** → 来源已确认 → 映射已知且核实;grid_verified=False 时
+  一律 not_concluded_grid_unverified,不再输出任何交接/大气一致性结论
+  (交错 detail 只保留 grid_unverified_staggered 标记,不再拼接
+  consistent 字样)。同时引入覆盖分层:n_valid < n_base 时结论为
+  consistent_on_valid_subset / differs_on_valid_subset(1/48 有效点的
+  反例不再判全域一致;不设任意覆盖率阈值)。端到端回归:交错网格漂移、
+  47/48 缺测两个反例均按新结论断言。
+- **R2 [P2] 多层读取缓存覆盖**:读取键改为 (stage, experiment, var.name,
+  var.layer);FieldRequest 增加 layer_dim 并在读取器中校验层维名称
+  (layer_dim_mismatch);CHECK_VARIABLES 出现重复非层变量名时 run() 开始
+  即报错。回归:层 0/层 1 双层配置,层 0 增量 5/48、层 1 增量 5/48+0.25,
+  两行数值与层标签均正确(旧实现会被覆盖成同值)。
+- **R3 [P2] 坐标时间维任意轴位**:read_stage_grid 的 read_coord 改为按
+  维度名称逐轴构造索引(与字段读取器一致),不再假设 Time 在第 0 轴。
+  回归:XLAT/XLONG 维度 (south_north, Time, west_east) 取第二时刻,
+  数值与手算一致。
+- **R4 [P2] 单位登记表区分别名与转换**:UNIT_ALIASES 值改为登记项——
+  type=alias(数值恒等的拼写别名,放行不变换)与 type=conversion
+  (file_unit×scale+offset=expected,先变换两侧再比较,detail 记录
+  "unit conversion applied");未实现的登记类型运行时拒绝。回归:
+  degC→K 转换(300K vs 26.85degC → 差 0)与 K/Kelvin 别名均正确,
+  未登记的不匹配仍被拒绝。
+- **R5 [P2] 键中必需语义取值未知**:check_joinable 对 REQUIRED_SEMANTIC
+  _FIELDS 逐键检查实际取值(含键列;值为 unknown/缺失 → unknown),
+  不因放在键列而放行;返回表新增 verdict_scope=limited_to_listed_fields
+  (声明判定只对调用者列出的字段成立,不能代替实际数据全部口径核验)。
+- **R6 [P2] 清单来源/映射确认分列**:manifest 的 mapping_confirmed 改取
+  当前试验 MappingSpec.confirmed(此前误用阶段来源确认),新增
+  mapping_known;time_record_used 写入 Times 命中的实际记录号
+  (FieldRead.time_index)。回归:来源确认+映射未确认时,清单两列分别为
+  True/False,且 I-A 结论 not_concluded_mapping_inferred_not_confirmed。
+- **R7 [P2,文档]**:删除旧错误条件"只在 I=A 且 B=I 时一致";充分条件
+  措辞更正并补充严格等价条件 B_s−B_w=δ_w(含审查反例)。
+
+## 测试结果
+
+- **51/51 通过**(50 项前有 + 1 项新增的多反例回归,含 R1 端到端、
+  R2 多层、R3 坐标轴序、R4 转换/别名、R5 键中未知、R6 清单分列)。
+- 仍未验证:B/A/I 真实路径、映射与单位依据的服务器确认;真实数据结果。
+
+
+---
+
+# 附:入口脚本默认模式切换(2026-10-05)
+
+应用户要求,verify_04_initial_handoff.py 默认模式改为 real(与服务器上
+已切换的 verify_01/02/03 一致),并附 acknowledge_real_mode=True。
+注意:真实模式下 B/A/I 阶段路径默认未配置,相应比较按
+source_not_configured 跳过并逐条记录;d_pair@F0 可直接计算。
+冒烟测试全部强制合成模式(不受入口默认影响),51/51 仍通过。
+verify_01/02/03 的服务器端模式改动已于 2026-10-05 同步回本地:三文件相对
+git HEAD 各 +5/−1,全部为 CONFIG 块的 mode="real" +
+real=RealPathConfig(acknowledge_real_mode=True),无其他改动(与服务器
+git diff 一致);四入口脚本默认模式现已统一为 real。同步过程中曾因一次
+失败的 ssh 抓取把本地三文件截断为 0 字节,已从 git HEAD 恢复后用服务器
+版本覆盖(最终内容以服务器为准,经 diff 与编译复核)。

@@ -21,6 +21,12 @@
 完整几何校验、区域状态 empty_input 区分。两基线(e_model/e_recon)与
 解释边界见 4b 节审查要点。
 
+更新(2026-10-03 第七轮):新增 verify_04 初值传递核验(d_assim/d_handoff/
+d_pair 三组差值分名;difference_stats;按名称定维度与 Times 匹配;无插值)
+与 caliber_link 口径对照(四档判定,默认 unknown);审查文档
+REVIEW_SOURCES_AND_CALIBER.md 记录 B/A/I/F0 来源关系与 8 项口径差异。
+B/A/I 真实路径为文件名推断、默认未配置,真实运行前需确认。
+
 更新(2026-10-02 第六轮):按数学逻辑复核修复——联合表子集质量标记唯一化
 (joint_status;attribution_flag_region_ref 仅对照)、汇总质量分层
 (n_times_quality_ok/failed、quality_coverage_ratio)、rms_sst_minus_actual
@@ -115,6 +121,39 @@ cross_term_stats 全 NaN 时 n_valid=0、诊断二全缺失不崩溃、
 - 两表 all_common 掩膜定义不同(联合表额外要求重建输出有限),
   跨表对照仅在点数相同的行逐位一致(端到端测试已断言)。
 - 子集质量标记按子集重算,不继承全区域标记。
+
+### 4c. 初值传递核验(verify_04;2026-10-04 按数学审查修订)
+
+| 公式/契约 | 实现位置 |
+|---|---|
+| d_assim = A − B;d_handoff = I − A;d_pair = X_strong − X_weak(三组分名) | `verify_04` 主循环 |
+| 差值统计:均值/RMS(差值均方根,非标准差)/最大绝对差/超容差计数;基础掩膜独立于数值有效性;按侧识别缺失与填充(\|x\|≥1e30) | `verify_common.stage_difference_stats` |
+| 单位门控:两侧实际 units 与配置一致才计算;缺失=unit_unknown、不符=unit_mismatch;别名须显式登记(UNIT_ALIASES) | `verify_04._unit_check` |
+| 起报时次契约:B/A/I 与 F0 只在 INIT_TIME_NAME 核验;无 Times 文件的回退记录号逐阶段显式配置;重复 Times=ambiguous、负记录号无效 | `verify_04`(INIT_TIME_NAME/CYCLE_ID/StageSource.time_record);`verify04_readers.read_stage_field` |
+| 网格:与字段同记录读取、坐标形状=字段形状、NaN 坐标拒绝;交错变量 grid_unverified_staggered | `verify04_readers.read_stage_grid` / `grids_match` |
+| 交接结论与数值分离:handoff_conclusion 需来源确认 + 逐试验映射核实,否则 not_concluded_* | `verify_04._handoff_conclusion`、`MAPPING_SPECS`(强试验=ncks.sh 清单;弱试验映射未知) |
+| 传递映射 M 逐试验:ncks_updateDARTvar.sh 12 变量(update_ocean=1);update_ocean=0 的 ncks_air.sh 本地缺失 → 弱试验映射未知 | `verify_04.MAPPING_SPECS`;REVIEW_SOURCES_AND_CALIBER.md |
+
+审查要点(2026-10-04 第二轮复核后增补):
+- 结论前提链:数值可计算 → **网格已核验**(grid_verified;交错网格
+  verified=False,只允许描述统计)→ 来源已确认 → 映射已知且核实;
+  任一不满足即 not_concluded_*(grids_match 三元组;
+  _handoff_conclusion);
+- 覆盖分层:n_valid < n_base 时结论为 consistent_on_valid_subset /
+  differs_on_valid_subset,不把未核验点算作已验证一致;
+- 缺测/填充按侧统计(n_missing_left/right、n_fill),基础掩膜不收缩;
+- 单位:严格门控;UNIT_ALIASES 区分 type=alias(拼写恒等)与
+  type=conversion(scale+offset 变换,detail 记录依据),未实现类型拒绝;
+- 层读取键含层号(多层配置不互相覆盖);层维名称按 layer_dim 校验;
+- 清单 mapping_confirmed 取自逐试验 MappingSpec(与来源确认分列),
+  time_record_used 记录 Times 命中的实际记录号;
+- d_assim/d_handoff/d_pair 是三个不同概念,字段与列名不混用;
+- I−A 对 M 外变量理论上 = B−A(背景保留),该预期仅作解释参考;
+- F0−I 是描述性比较(WRF 初始化效果),不是交接残差;
+- "OM_TMP 变而 TSK 不变"在 update_tsk 流程未启用时是设计行为;
+- dom0 = (B_s−B_w) + [(A_s−B_s)−(A_w−B_w)],首先对应 d_pair@F0;
+  "共同背景且弱试验无更新"是充分条件,严格等价条件为 B_s−B_w=δ_w
+  (见 REVIEW_SOURCES_AND_CALIBER.md 更正)。
 
 ### 5. 汇总统计(两个改善口径)
 

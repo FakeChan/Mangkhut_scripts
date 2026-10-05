@@ -392,7 +392,8 @@ def check_import_side_effect_free() -> Check:
         "import sys; sys.path.insert(0, '.');"
         "import verify_common, verify_synthetic,"
         "verify_01_skill_timeseries, verify_02_flux_error_budget,"
-        "verify_03_fixed_atmosphere_flux;"
+        "verify_03_fixed_atmosphere_flux, verify_04_initial_handoff,"
+        "verify04_readers, caliber_link;"
         "print('IMPORTS_OK')"
     )
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
@@ -1324,6 +1325,872 @@ def check_verify02_all_missing_run() -> Check:
     return check
 
 
+# ==================================================================
+# verify_04:初值传递核验与口径衔接
+# ==================================================================
+
+
+def _write_tiny_stage_file(path, values_by_var, times, lat, lon,
+                           dim_orders=None, with_units=True):
+    """写一个小型阶段 NetCDF(values_by_var: {var: (data_with_time, dims, unit)})。
+
+    dim_orders 可按变量名给维度元组;默认标准顺序。
+    """
+    from netCDF4 import Dataset
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ny, nx = lat.shape
+    with Dataset(path, "w", format="NETCDF4") as ds:
+        ds.createDimension("Time", None)
+        ds.createDimension("ocean_layer_stag", 2)
+        ds.createDimension("bottom_top", 3)
+        ds.createDimension("south_north", ny)
+        ds.createDimension("west_east", nx)
+        times_var = ds.createVariable("Times", str, ("Time",))
+        for record, stamp in enumerate(times):
+            times_var[record] = stamp
+        v = ds.createVariable("XLAT", "f8", ("Time", "south_north", "west_east"))
+        v[0] = lat
+        v = ds.createVariable("XLONG", "f8", ("Time", "south_north", "west_east"))
+        v[0] = lon
+        for name, (data, dims, unit) in values_by_var.items():
+            var = ds.createVariable(name, "f8", dims)
+            if with_units:
+                var.units = unit
+            var[:] = data
+
+
+def check_verify04_handoff_manual() -> Check:
+    """verify_04 手算核验(预期值全部来自显式构造):
+    A=B、I=A → 两类残差零;I 部分保留 A → 预期残差;正负抵消 → 均值零 RMS 非零;
+    错时刻/缺变量/维度换序/多时间记录/单位缺失。"""
+    check = Check("verify_04 手算(残差/时刻/换序/单位)")
+    import tempfile
+    from verify04_readers import FieldRequest, read_stage_field
+
+    root = Path(tempfile.mkdtemp(prefix="v04_manual_", dir=SMOKE_OUT))
+    ny, nx = 3, 4
+    lat = 13.0 + 0.1 * np.arange(ny)[:, None] * np.ones((1, nx))
+    lon = 137.0 + 0.1 * np.arange(nx)[None, :] * np.ones((ny, 1))
+    times = ["2018-09-10_00:00:00", "2018-09-10_00:30:00"]
+
+    # 场景 1-3:B/A/I 三个文件,OM_TMP: A=B+1(增量),I=A-0.3(部分保留)
+    om_b = np.full((2, 1, ny, nx), 300.0)
+    om_a = om_b + 1.0
+    om_i = om_a - 0.3
+    _write_tiny_stage_file(
+        root / "B.nc",
+        {"OM_TMP": (om_b, ("Time", "ocean_layer_stag", "south_north", "west_east"), "K")},
+        times, lat, lon,
+    )
+    _write_tiny_stage_file(
+        root / "A.nc",
+        {"OM_TMP": (om_a, ("Time", "ocean_layer_stag", "south_north", "west_east"), "K")},
+        times, lat, lon,
+    )
+    _write_tiny_stage_file(
+        root / "I.nc",
+        {"OM_TMP": (om_i, ("Time", "ocean_layer_stag", "south_north", "west_east"), "K")},
+        times, lat, lon,
+    )
+    req = FieldRequest("OM_TMP", times[1], layer=0, expected_unit="K")
+    rb = read_stage_field(root / "B.nc", req)
+    ra = read_stage_field(root / "A.nc", req)
+    ri = read_stage_field(root / "I.nc", req)
+    for read in (rb, ra, ri):
+        check.expect(read.status == "ok", f"读取应 ok: {read.status} {read.detail}")
+        check.expect(read.time_source == "times_attribute"
+                     and read.time_found == times[1],
+                     f"应按 Times 属性匹配第二个记录: {read.time_source}/{read.time_found}")
+    stats_assim = vc.difference_stats(ra.values - rb.values, np.isfinite(ra.values), 1e-3)
+    check.expect(abs(stats_assim["mean_diff"] - 1.0) < 1e-12,
+                 f"d_assim 均值应为 1: {stats_assim['mean_diff']}")
+    stats_handoff = vc.difference_stats(ri.values - ra.values, np.isfinite(ra.values), 1e-3)
+    check.expect(abs(stats_handoff["mean_diff"] + 0.3) < 1e-12,
+                 f"d_handoff 应为 -0.3(I 部分保留 A): {stats_handoff['mean_diff']}")
+
+    # 场景 4:正负抵消 —— 均值为零但 RMS 非零;容差计数
+    diff = np.array([[1.0, -1.0], [1.0, -1.0]])
+    stats_cancel = vc.difference_stats(diff, np.ones((2, 2), dtype=bool), tolerance=0.5)
+    check.expect(abs(stats_cancel["mean_diff"]) < 1e-12,
+                 f"抵消场均值应为 0: {stats_cancel['mean_diff']}")
+    check.expect(abs(stats_cancel["rms_diff"] - 1.0) < 1e-12,
+                 f"抵消场 RMS 应为 1: {stats_cancel['rms_diff']}")
+    check.expect(stats_cancel["n_over_tolerance"] == 4
+                 and abs(stats_cancel["frac_over_tolerance"] - 1.0) < 1e-12,
+                 "超容差计数错误")
+    empty = vc.difference_stats(diff, np.zeros((2, 2), dtype=bool), 0.5)
+    check.expect(empty["status"] == "empty_mask" and not np.isfinite(empty["rms_diff"]),
+                 "空掩膜应返回 NaN + empty_mask")
+    all_nan = vc.difference_stats(np.full((2, 2), np.nan), np.ones((2, 2), dtype=bool), 0.5)
+    check.expect(all_nan["status"] == "all_nan_inside_mask" and all_nan["n_valid"] == 0,
+                 f"全 NaN 应 n_valid=0: {all_nan['n_valid']}")
+
+    # 场景 5:错时刻 → time_not_found;维度换序 → 读取归一化为 (ny, nx);
+    # 单位缺失 → unit_matches=None;多时间记录 + Times 缺失 → record_index 回退
+    bad_time = read_stage_field(root / "A.nc", FieldRequest("OM_TMP", "2018-09-11_00:00:00", layer=0))
+    check.expect(bad_time.status == "time_not_found", f"错时刻应 time_not_found: {bad_time.status}")
+    # 换序文件:T 写成 (Time, west_east, bottom_top, south_north)
+    t_perm = np.zeros((2, nx, 3, ny))
+    t_perm[:, :, 0, :] = 5.0
+    _write_tiny_stage_file(
+        root / "PERM.nc",
+        {"T": (t_perm, ("Time", "west_east", "bottom_top", "south_north"), "K")},
+        times, lat, lon,
+    )
+    rperm = read_stage_field(root / "PERM.nc", FieldRequest("T", times[0], layer=0, expected_unit="K"))
+    check.expect(rperm.status == "ok", f"换序文件读取应 ok: {rperm.status} {rperm.detail}")
+    check.expect(rperm.values.shape == (ny, nx),
+                 f"换序文件应归一化为 (ny,nx): {rperm.values.shape}")
+    check.expect(bool(np.allclose(rperm.values, 5.0)), "换序读取数值错误")
+    _write_tiny_stage_file(
+        root / "NOUNIT.nc",
+        {"TSK": (np.full((2, ny, nx), 302.0), ("Time", "south_north", "west_east"), "K")},
+        times, lat, lon, with_units=False,
+    )
+    rnounit = read_stage_field(root / "NOUNIT.nc", FieldRequest("TSK", times[0], expected_unit="K"))
+    check.expect(rnounit.status == "ok" and rnounit.unit_matches is None,
+                 f"缺 units 属性应 unit_matches=None: {rnounit.unit_matches}")
+    # Times 缺失 → 显式记录号回退
+    from netCDF4 import Dataset
+
+    path_notimes = root / "NOTIMES.nc"
+    with Dataset(path_notimes, "w", format="NETCDF4") as ds:
+        ds.createDimension("Time", 2)
+        ds.createDimension("south_north", ny)
+        ds.createDimension("west_east", nx)
+        var = ds.createVariable("TSK", "f8", ("Time", "south_north", "west_east"))
+        var[0] = 300.0
+        var[1] = 301.0
+    r_record = read_stage_field(
+        path_notimes, FieldRequest("TSK", times[1], time_record=1, expected_unit="K")
+    )
+    check.expect(r_record.status == "ok" and r_record.time_source == "record_index"
+                 and float(r_record.values.mean()) == 301.0,
+                 f"无 Times 时应按显式记录号回退: {r_record.status}/{r_record.time_source}")
+    r_no_record = read_stage_field(
+        path_notimes, FieldRequest("TSK", times[1], expected_unit="K")
+    )
+    check.expect(r_no_record.status == "time_not_found",
+                 "无 Times 且无记录号应 time_not_found(不盲目取第 0 条)")
+    return check
+
+
+def check_verify04_stage_skips() -> Check:
+    """verify_04 阶段缺失:只跳过依赖它的比较;强弱背景不同时
+    d_pair 与 d_assim 字段名分离;OM_TMP 变而 TSK 不变不判错。"""
+    check = Check("verify_04 阶段缺失与字段命名分离")
+    import dataclasses
+    import tempfile
+    v04 = __import__("verify_04_initial_handoff")
+    run_root = Path(tempfile.mkdtemp(prefix="v04_run_", dir=SMOKE_OUT / "runs"))
+    config = VerifyConfig(
+        mode="synthetic",
+        methods=("EAKF",),
+        members=("006",),
+        times=((0.0, "2018-09-10_00:00:00"), (0.5, "2018-09-10_00:30:00")),
+        output_root=run_root,
+    )
+    out_dir = v04.run(config)
+    pairwise = pd.read_csv(out_dir / "verify04_pairwise_checks.csv", dtype={"member": str})
+    pairs = pd.read_csv(out_dir / "verify04_initial_pair_checks.csv", dtype={"member": str})
+    coverage = pd.read_csv(out_dir / "verify04_coverage.csv")
+    manifest = pd.read_csv(out_dir / "verify04_source_manifest.csv")
+    # 手算:OM_TMP d_assim = A-B = inc(均值 5/48≈0.1042,含正负抵消);
+    # d_handoff I-A = 0;TSK 全程同值 → 三类差均为 0 且 TSK 在 M 外;
+    # d_pair@I 大气=0、OM_TMP=0.6(强弱背景不同)
+    sel = pairwise[(pairwise.variable == "OM_TMP") & (pairwise.experiment == config.strong_experiment)]
+    assim = sel[sel.stage_pair == "A-B"]
+    handoff = sel[sel.stage_pair == "I-A"]
+    check.expect(bool((assim.status == "ok").all()) and abs(assim.mean_diff.iloc[0] - 5.0 / 48.0) < 1e-12,
+                 f"OM_TMP d_assim 均值应为 5/48: {assim.mean_diff.iloc[0]}")
+    check.expect(bool((handoff.status == "ok").all())
+                 and bool((handoff[["mean_diff", "rms_diff", "max_abs_diff"]].abs() < 1e-12).all().all()),
+                 "OM_TMP d_handoff 应为 0(I=A)")
+    tsk_rows = pairwise[(pairwise.variable == "TSK") & (pairwise.stage_pair == "I-A")]
+    check.expect(bool(tsk_rows.detail.str.contains("mapping_unverified").all()),
+                 "TSK 的 d_handoff 应标注 mapping_unverified(M 外变量),而非错误")
+    # 字段名分离:d_assim 表有 stage_pair 列,pair 表有 stage 列,无同名列冲突
+    check.expect("stage_pair" in pairwise.columns and "stage" in pairs.columns,
+                 "d_assim/d_pair 表的阶段列名应区分")
+    check.expect(not ({"mean_diff"} & set(pairs.columns)), "pair 表不应复用 mean_diff 列名")
+    pair_i = pairs[(pairs.stage == "I") & (pairs.variable == "T")
+                   & (pairs.valid_time == "2018-09-10_00:00:00")]
+    check.expect(bool((pair_i.detail == "atmosphere_pair_consistent_within_tolerance").all()),
+                 "强弱大气启动状态应一致(合成场景)")
+    pair_b_om = pairs[(pairs.stage == "B") & (pairs.variable == "OM_TMP")]
+    check.expect(bool(((pair_b_om.mean_pair_diff - 0.6).abs() < 1e-12).all()),
+                 f"强弱背景差应为 0.6: {pair_b_om.mean_pair_diff.tolist()}")
+    # 覆盖表:expected/attempted/completed 一致
+    om_cov = coverage[(coverage.comparison == "A-B") & (coverage.variable == "OM_TMP")]
+    # 起报时次契约:expected = 1 成员 × 1 起报时次 × 强弱 2 试验 = 2,全部完成
+    check.expect(bool((om_cov.expected == 2).all()) and bool((om_cov.completed == 2).all())
+                 and bool((om_cov.skipped == 0).all()),
+                 f"A-B OM_TMP 覆盖应为 expected=2(completed=2): {om_cov.to_dict('records')}")
+    # 起报时次契约:全部比较只在 INIT_TIME_NAME 上(lead time 不充当 cycle)
+    check.expect(set(pairwise.valid_time.unique()) == {"2018-09-10_00:00:00"},
+                 "比较应只在起报循环有效时间上进行")
+    # 映射/来源门控:数值 ok 但结论未定(来源默认未确认)
+    om_ia = pairwise[(pairwise.stage_pair == "I-A") & (pairwise.variable == "OM_TMP")]
+    check.expect(bool((om_ia.handoff_conclusion
+                       == "not_concluded_source_unconfirmed").all()),
+                 "来源未确认时 I-A 结论应为 not_concluded_source_unconfirmed")
+    check.expect(bool((om_ia.status == "ok").all()),
+                 "数值可计算(status=ok)与结论分离")
+    # 弱试验映射未知:detail 记 mapping_unverified
+    weak_ia = pairwise[(pairwise.stage_pair == "I-A")
+                       & (pairwise.experiment == config.weak_experiment)
+                       & (pairwise.variable == "OM_TMP")]
+    check.expect(bool(weak_ia.detail.str.contains("mapping_unverified").all()),
+                 "弱试验(ncks_air.sh 缺失)映射未知应记 mapping_unverified")
+    # 交错变量:grid_unverified_staggered 显式标记,且网格未核验时
+    # 不得出现大气一致性结论(R1)
+    u_pair = pairs[(pairs.stage == "I") & (pairs.variable == "U")]
+    check.expect(bool(u_pair.detail.str.contains("grid_unverified_staggered").all()),
+                 "交错变量应显式标记 grid_unverified_staggered")
+    check.expect(bool(~u_pair.detail.str.contains("consistent").all()),
+                 "网格未核验时不得输出大气一致性结论")
+    # 清单:四阶段逐文件记录,路径含 experiment/method
+    check.expect(set(manifest.stage.unique()) == {"B", "A", "I", "F0"},
+                 "来源清单应覆盖 B/A/I/F0 四阶段")
+    check.expect(bool(manifest.path.str.contains("6mem_oceanAssim1Run1_EAKF_006").any()),
+                 "清单路径应含 experiment/method 信息(来源可追溯)")
+    # 口径表存在且包含全部维度
+    caliber = pd.read_csv(out_dir / "caliber_compat_table.csv")
+    check.expect(len(caliber) == len(vc.CALIBER_DIMENSIONS) if hasattr(vc, "CALIBER_DIMENSIONS")
+                 else len(caliber) >= 10, "口径对照表维度数异常")
+    check.expect(set(caliber.verdict).issubset({
+        "value_by_value", "parallel_evidence", "not_comparable", "unknown",
+    }), "口径判定应限于四档")
+    return check
+
+
+def check_verify04_unit_fill_grid_gates() -> Check:
+    """审查反例的端到端回归(P1 #1/#2/#4):
+    - B(K) vs A(degC)→ unit_mismatch,不输出可解释的温度差;
+    - 24/48 点双侧 NaN → n_base=48 不收缩、n_missing=36、手算均值 5/12;
+    - 双侧同点 1e35 填充 → n_fill=12 显式暴露,不伪装零差;
+    - A 网格在起报记录漂移 1° → grid_mismatch。"""
+    check = Check("verify_04 单位/填充/网格门控(端到端)")
+    import tempfile
+    from netCDF4 import Dataset
+
+    v04 = __import__("verify_04_initial_handoff")
+    original_writer = v04._write_synthetic_inputs
+    run_root = Path(tempfile.mkdtemp(prefix="v04_gates_", dir=SMOKE_OUT / "runs"))
+
+    def patched_run(config, mutate):
+        def writer(cfg):
+            path = original_writer(cfg)
+            mutate(path)
+            return path
+        v04._write_synthetic_inputs = writer
+        try:
+            return v04.run(config)
+        finally:
+            v04._write_synthetic_inputs = original_writer
+
+    base_config = VerifyConfig(
+        mode="synthetic", methods=("EAKF",), members=("006",),
+        times=((0.0, "2018-09-10_00:00:00"), (0.5, "2018-09-10_00:30:00")),
+    )
+
+    def a_files(synth_root, experiment):
+        return sorted(synth_root.glob(f"A_{experiment}_EAKF_006_d02.nc"))
+
+    # --- 反例 1:单位不匹配(A 为 degC)---
+    def mutate_units(synth_root):
+        for path in a_files(synth_root, "6mem_oceanAssim1Run1"):
+            with Dataset(path, "r+") as ds:
+                ds.variables["OM_TMP"].units = "degC"
+
+    out1 = patched_run(dataclasses.replace(
+        base_config, output_root=run_root, output_dirname="units"
+    ), mutate_units)
+    pairwise1 = pd.read_csv(out1 / "verify04_pairwise_checks.csv", dtype={"member": str})
+    row = pairwise1[(pairwise1.stage_pair == "A-B") & (pairwise1.variable == "OM_TMP")
+                    & (pairwise1.experiment == "6mem_oceanAssim1Run1")]
+    check.expect(bool((row.status == "unit_mismatch").all()),
+                 f"单位不符应 unit_mismatch: {row.status.tolist()}")
+    check.expect(bool(row.mean_diff.isna().all()),
+                 "单位不符时不应输出数值")
+    # unit_left = 差值左操作数(A,后被改为 degC);unit_right = B(K)
+    check.expect(bool((row.unit_left == "degC").all() and (row.unit_right == "K").all()),
+                 f"应保留两侧原始单位: {row.unit_left.tolist()}/{row.unit_right.tolist()}")
+    # A-B 不是交接比较:结论列保持 n/a,门控体现在 status
+    check.expect(bool((row.handoff_conclusion == "n/a (not a handoff comparison)").all()),
+                 "A-B 行结论列应为 n/a(门控在 status)")
+    ia_row = pairwise1[(pairwise1.stage_pair == "I-A") & (pairwise1.variable == "OM_TMP")
+                       & (pairwise1.experiment == "6mem_oceanAssim1Run1")]
+    check.expect(bool((ia_row.status == "unit_mismatch").all()
+                      and (ia_row.handoff_conclusion
+                           == "not_concluded:unit_mismatch").all()),
+                 "I-A 行单位不符应 not_concluded:unit_mismatch")
+
+    # --- 反例 2:双侧 NaN(36 点)与双侧同点填充(12 点)---
+    def mutate_missing_fill(synth_root):
+        for path in a_files(synth_root, "6mem_oceanAssim1Run1"):
+            with Dataset(path, "r+") as ds:
+                var = ds.variables["OM_TMP"]
+                for record in range(var.shape[0]):
+                    var[record, 0, 3:, :] = np.nan          # 36 点缺测
+                    var[record, 0, :3, :4] = 1.0e35         # 12 点填充(双侧同值)
+        for path in sorted(synth_root.glob("B_6mem_oceanAssim1Run1_EAKF_006_d02.nc")):
+            with Dataset(path, "r+") as ds:
+                var = ds.variables["OM_TMP"]
+                for record in range(var.shape[0]):
+                    var[record, 0, 3:, :] = np.nan
+                    var[record, 0, :3, :4] = 1.0e35
+
+    out2 = patched_run(dataclasses.replace(
+        base_config, output_root=run_root, output_dirname="fill"
+    ), mutate_missing_fill)
+    pairwise2 = pd.read_csv(out2 / "verify04_pairwise_checks.csv", dtype={"member": str})
+    row2 = pairwise2[(pairwise2.stage_pair == "A-B") & (pairwise2.variable == "OM_TMP")
+                     & (pairwise2.experiment == "6mem_oceanAssim1Run1")]
+    # 手算:缺测 36 点(rows 3:)、填充 12 点(增量区 rows :3,:4,双侧同值
+    # 1e35 → 若直接相减会伪装成零差);有效点 = 其余 12 点,该区域增量恰为 0
+    # → mean=0、rms=0,但 n_fill=12 显式暴露填充,不把零差当作通过
+    check.expect(bool((row2.n_base == 48).all()),
+                 f"基础掩膜不应随缺测收缩: {row2.n_base.tolist()}")
+    check.expect(bool((row2.n_valid == 12).all()),
+                 f"有效点应为 12: {row2.n_valid.tolist()}")
+    check.expect(bool((row2.n_missing == 36).all()),
+                 f"缺失应记 36: {row2.n_missing.tolist()}")
+    check.expect(bool((row2.n_fill == 12).all()),
+                 f"填充点应显式记 12(不再伪装零差): {row2.n_fill.tolist()}")
+    check.expect(bool((row2.mean_diff.abs() < 1e-12).all())
+                 and bool((row2.rms_diff < 1e-12).all()),
+                 f"有效区增量应为 0: {row2.mean_diff.tolist()}")
+    # 阶段差统计不会把填充相消当成 48 个有效点的一致性证据
+    check.expect(bool((row2.frac_over_tolerance == 0.0).all()),
+                 "有效区超容差比例应为 0(增量区已被排除并单列)")
+
+    # --- 反例 3:A 网格在起报记录漂移 1° ---
+    def mutate_grid(synth_root):
+        for path in a_files(synth_root, "6mem_oceanAssim1Run1"):
+            with Dataset(path, "r+") as ds:
+                ds.variables["XLAT"][0] += 1.0
+
+    out3 = patched_run(dataclasses.replace(
+        base_config, output_root=run_root, output_dirname="griddrift"
+    ), mutate_grid)
+    pairwise3 = pd.read_csv(out3 / "verify04_pairwise_checks.csv", dtype={"member": str})
+    row3 = pairwise3[(pairwise3.stage_pair == "A-B") & (pairwise3.variable == "OM_TMP")
+                     & (pairwise3.experiment == "6mem_oceanAssim1Run1")]
+    check.expect(bool((row3.status == "grid_mismatch").all()),
+                 f"网格漂移应 grid_mismatch: {row3.status.tolist()}")
+    check.expect(bool(row3.mean_diff.isna().all()),
+                 "网格不匹配时不应输出数值(不插值掩盖)")
+    return check
+
+
+def check_verify04_mapping_conclusion() -> Check:
+    """映射门控单测(审查 P1 #5 + R1/R1 覆盖分层):来源/网格/映射/容差分层。"""
+    check = Check("verify_04 映射结论分层")
+    from verify_04_initial_handoff import MappingSpec, _handoff_conclusion
+
+    spec_unknown = MappingSpec("exp0", None, "ncks_air.sh missing")
+    spec_inferred = MappingSpec(
+        "exp1", ("OM_TMP", "T"), "ncks.sh list", confirmed=False
+    )
+    spec_confirmed = dataclasses.replace(spec_inferred, confirmed=True)
+    # 网格未核验(R1):任何数值一致都不给交接结论
+    check.expect(
+        _handoff_conclusion("I-A", "ok", 0.0, True, spec_confirmed, "OM_TMP",
+                            grid_verified=False, n_valid=48, n_base=48)
+        == "not_concluded_grid_unverified",
+        "网格未核验应 not_concluded_grid_unverified",
+    )
+    # 来源未确认
+    check.expect(
+        _handoff_conclusion("I-A", "ok", 0.0, False, spec_confirmed, "OM_TMP",
+                            grid_verified=True, n_valid=48, n_base=48)
+        == "not_concluded_source_unconfirmed",
+        "来源未确认应先于映射判定",
+    )
+    # 映射未知
+    check.expect(
+        _handoff_conclusion("I-A", "ok", 0.0, True, spec_unknown, "OM_TMP",
+                            grid_verified=True, n_valid=48, n_base=48)
+        == "not_concluded_mapping_unknown",
+        "映射未知应 not_concluded_mapping_unknown",
+    )
+    # M 外变量
+    check.expect(
+        _handoff_conclusion("I-A", "ok", 0.0, True, spec_confirmed, "TSK",
+                            grid_verified=True, n_valid=48, n_base=48)
+        == "not_concluded_variable_outside_mapping",
+        "M 外变量应 not_concluded_variable_outside_mapping",
+    )
+    # 映射推断未确认
+    check.expect(
+        _handoff_conclusion("I-A", "ok", 0.0, True, spec_inferred, "OM_TMP",
+                            grid_verified=True, n_valid=48, n_base=48)
+        == "not_concluded_mapping_inferred_not_confirmed",
+        "映射推断未确认应 not_concluded_mapping_inferred_not_confirmed",
+    )
+    # 全部满足后按容差与覆盖分层给结论
+    check.expect(
+        _handoff_conclusion("I-A", "ok", 0.0, True, spec_confirmed, "OM_TMP",
+                            grid_verified=True, n_valid=48, n_base=48)
+        == "consistent_within_tolerance",
+        "全域容差内应 consistent_within_tolerance",
+    )
+    check.expect(
+        _handoff_conclusion("I-A", "ok", 0.0, True, spec_confirmed, "OM_TMP",
+                            grid_verified=True, n_valid=1, n_base=48)
+        == "consistent_on_valid_subset",
+        "部分覆盖应 consistent_on_valid_subset(R1 覆盖分层)",
+    )
+    check.expect(
+        _handoff_conclusion("I-A", "ok", 0.5, True, spec_confirmed, "OM_TMP",
+                            grid_verified=True, n_valid=48, n_base=48)
+        == "differs_outside_tolerance",
+        "超容差应 differs_outside_tolerance",
+    )
+    check.expect(
+        _handoff_conclusion("I-A", "ok", 0.5, True, spec_confirmed, "OM_TMP",
+                            grid_verified=True, n_valid=1, n_base=48)
+        == "differs_on_valid_subset",
+        "部分覆盖超容差应 differs_on_valid_subset",
+    )
+    return check
+
+
+def check_verify04_round2_fixes() -> Check:
+    """第二轮复核反例的端到端回归(R1/R2/R3/R4/R5/R6)。"""
+    check = Check("verify_04 第二轮复核回归")
+    import tempfile
+    from netCDF4 import Dataset
+
+    v04 = __import__("verify_04_initial_handoff")
+    original_writer = v04._write_synthetic_inputs
+    original_defaults = dict(v04.STAGE_SOURCE_DEFAULTS)
+    original_mapping = dict(v04.MAPPING_SPECS)
+    original_vars = v04.CHECK_VARIABLES
+    run_root = Path(tempfile.mkdtemp(prefix="v04_r2_", dir=SMOKE_OUT / "runs"))
+
+    def patched_run(config, mutate=None, confirm_source=False,
+                    confirm_mapping=False):
+        def writer(cfg):
+            path = original_writer(cfg)
+            if mutate is not None:
+                mutate(path)
+            return path
+        v04._write_synthetic_inputs = writer
+        if confirm_source:
+            v04.STAGE_SOURCE_DEFAULTS = {
+                stage: dataclasses.replace(info, confirmed=True)
+                for stage, info in v04.STAGE_SOURCE_DEFAULTS.items()
+            }
+        if confirm_mapping:
+            v04.MAPPING_SPECS = {
+                name: dataclasses.replace(spec, confirmed=True)
+                for name, spec in v04.MAPPING_SPECS.items()
+                if spec.variables is not None
+            }
+        try:
+            return v04.run(config)
+        finally:
+            v04._write_synthetic_inputs = original_writer
+            v04.STAGE_SOURCE_DEFAULTS = original_defaults
+            v04.MAPPING_SPECS = original_mapping
+            v04.CHECK_VARIABLES = original_vars
+
+    base_config = VerifyConfig(
+        mode="synthetic", methods=("EAKF",), members=("006",),
+        times=((0.0, "2018-09-10_00:00:00"), (0.5, "2018-09-10_00:30:00")),
+    )
+
+    def a_files(synth_root):
+        return sorted(synth_root.glob("A_6mem_oceanAssim1Run1_EAKF_006_d02.nc"))
+
+    # --- R1:交错网格漂移但数值相等 → 不得给出一致性结论 ---
+    def mutate_staggered_drift(synth_root):
+        for path in a_files(synth_root):
+            with Dataset(path, "r+") as ds:
+                ds.variables["XLAT"][0] += 1.0   # A 网格漂移(交错场数值不变)
+
+    out1 = patched_run(dataclasses.replace(
+        base_config, output_root=run_root, output_dirname="r1"
+    ), mutate_staggered_drift, confirm_source=True, confirm_mapping=True)
+    pairwise1 = pd.read_csv(out1 / "verify04_pairwise_checks.csv", dtype={"member": str})
+    u_row = pairwise1[(pairwise1.stage_pair == "I-A") & (pairwise1.variable == "U")
+                      & (pairwise1.experiment == "6mem_oceanAssim1Run1")]
+    check.expect(bool((u_row.status == "ok").all()),
+                 "交错数值相等应可计算")
+    check.expect(bool((u_row.handoff_conclusion
+                       == "not_concluded_grid_unverified").all()),
+                 f"网格未核验不得给交接结论: {u_row.handoff_conclusion.tolist()}")
+    pairs1 = pd.read_csv(out1 / "verify04_initial_pair_checks.csv", dtype={"member": str})
+    u_pair = pairs1[(pairs1.stage == "I") & (pairs1.variable == "U")]
+    check.expect(bool(~u_pair.detail.str.contains("consistent").all()),
+                 "网格未核验时大气一致性描述不得出现")
+
+    # --- R1 覆盖:47 点双侧 NaN、1 点相等 → consistent_on_valid_subset ---
+    def mutate_coverage(synth_root):
+        # 同时改 A 与 I 文件:使 [0,0] 点 I-A=0(其余点缺测)
+        for pattern in ("A_6mem_oceanAssim1Run1_EAKF_006_d02.nc",
+                        "I_6mem_oceanAssim1Run1_EAKF_006_d02.nc"):
+            for path in sorted(synth_root.glob(pattern)):
+                with Dataset(path, "r+") as ds:
+                    var = ds.variables["OM_TMP"]
+                    var[:, 0, :, :] = np.nan
+                    var[0, 0, 0, 0] = 301.0
+        # 强弱 I 文件的大气场仅一个共同有效点相等，不代表全域一致。
+        for path in sorted(synth_root.glob("I_*_EAKF_006_d02.nc")):
+            with Dataset(path, "r+") as ds:
+                ds.variables["T"][:, 0, :, :] = np.nan
+                ds.variables["T"][0, 0, 0, 0] = 1.0
+
+    out2 = patched_run(dataclasses.replace(
+        base_config, output_root=run_root, output_dirname="r1cov"
+    ), mutate_coverage, confirm_source=True, confirm_mapping=True)
+    pairwise2 = pd.read_csv(out2 / "verify04_pairwise_checks.csv", dtype={"member": str})
+    row2 = pairwise2[(pairwise2.stage_pair == "I-A") & (pairwise2.variable == "OM_TMP")
+                     & (pairwise2.experiment == "6mem_oceanAssim1Run1")]
+    check.expect(bool((row2.handoff_conclusion
+                       == "consistent_on_valid_subset").all()),
+                 f"部分覆盖应 consistent_on_valid_subset: "
+                 f"{row2.handoff_conclusion.tolist()}")
+    pairs2 = pd.read_csv(out2 / "verify04_initial_pair_checks.csv")
+    t_pair = pairs2[(pairs2.stage == "I") & (pairs2.variable == "T")]
+    check.expect(len(t_pair) == 1 and bool((t_pair.n_base == 48).all())
+                 and bool((t_pair.n_valid == 1).all())
+                 and bool((t_pair.n_missing == 47).all())
+                 and bool((t_pair.rms_pair_diff == 0.0).all()),
+                 "部分覆盖大气比较应保留原有计数与零差值")
+    check.expect(bool((t_pair.detail
+                       == "atmosphere_pair_consistent_on_valid_subset").all()),
+                 f"部分覆盖大气结论应限定有效子集: {t_pair.detail.tolist()}")
+
+    # --- R2:多层配置不互相覆盖(layer0 增量 5/48,layer1 增量 +0.25)---
+    v04.CHECK_VARIABLES = (
+        v04.CheckVariable("OM_TMP", "K", 0, "ocean_layer_stag", 1.0e-3, "ocean"),
+        v04.CheckVariable("OM_TMP", "K", 1, "ocean_layer_stag", 1.0e-3, "ocean"),
+    )
+
+    def mutate_layer1(synth_root):
+        for path in a_files(synth_root):
+            with Dataset(path, "r+") as ds:
+                var = ds.variables["OM_TMP"]
+                var[:, 1, :, :] += 0.25   # 仅层 1 额外增量
+
+    out3 = patched_run(dataclasses.replace(
+        base_config, output_root=run_root, output_dirname="r2"
+    ), mutate_layer1)
+    pairwise3 = pd.read_csv(out3 / "verify04_pairwise_checks.csv", dtype={"member": str})
+    om3 = pairwise3[(pairwise3.stage_pair == "A-B")
+                    & (pairwise3.variable == "OM_TMP")
+                    & (pairwise3.experiment == "6mem_oceanAssim1Run1")]
+    layer0 = om3[om3.layer == 0]
+    layer1 = om3[om3.layer == 1]
+    check.expect(len(layer0) == 1 and len(layer1) == 1,
+                 f"多层应各输出一行: {len(layer0)}/{len(layer1)}")
+    check.expect(abs(layer0.mean_diff.iloc[0] - 5.0 / 48.0) < 1e-12,
+                 f"层 0 增量应为 5/48: {layer0.mean_diff.iloc[0]}")
+    check.expect(abs(layer1.mean_diff.iloc[0] - (5.0 / 48.0 + 0.25)) < 1e-12,
+                 f"层 1 增量应为 5/48+0.25(不被层 0 覆盖): {layer1.mean_diff.iloc[0]}")
+    check.expect(int(layer0.layer.iloc[0]) == 0 and int(layer1.layer.iloc[0]) == 1,
+                 "层标签应正确")
+
+    # --- R3:坐标 Time 维不在第 0 轴 → 按名称取正确记录 ---
+    import verify04_readers as vr
+    grid_root = Path(tempfile.mkdtemp(prefix="v04_grid_", dir=SMOKE_OUT))
+    grid_path = grid_root / "GRID_PERM.nc"
+    times = ["2018-09-10_00:00:00", "2018-09-10_00:30:00"]
+    expected_lat = np.arange(10, 22, dtype=float).reshape(3, 4)  # 第二时刻
+    with Dataset(grid_path, "w", format="NETCDF4") as ds:
+        ds.createDimension("south_north", 3)
+        ds.createDimension("Time", None)
+        ds.createDimension("west_east", 4)
+        tv = ds.createVariable("Times", str, ("Time",))
+        for record, stamp in enumerate(times):
+            tv[record] = stamp
+        v = ds.createVariable("XLAT", "f8", ("south_north", "Time", "west_east"))
+        v[:, 0, :] = np.arange(20, 32, dtype=float).reshape(3, 4)  # 第一时刻
+        v[:, 1, :] = expected_lat                                   # 第二时刻
+        v = ds.createVariable("XLONG", "f8", ("south_north", "Time", "west_east"))
+        v[:, 0, :] = np.tile(np.arange(4), (3, 1))
+        v[:, 1, :] = np.tile(np.arange(4), (3, 1))
+    lat, lon, status = vr.read_stage_grid(grid_path, times[1])
+    check.expect(status == "ok", f"非首轴 Time 读取应 ok: {status}")
+    check.expect(lat is not None and lat.shape == (3, 4)
+                 and bool(np.allclose(lat, expected_lat)),
+                 f"非首轴 Time 应取到正确记录: {None if lat is None else lat.shape}")
+
+    # --- R4:登记的数值转换先变换再比较;拼写别名不改变数值 ---
+    out4 = patched_run(dataclasses.replace(
+        base_config, output_root=run_root, output_dirname="r4"
+    ), None)
+    # 登记 degC -> K 转换(scale 1, offset 273.15)与 K/Kelvin 拼写别名
+    v04.UNIT_ALIASES = {
+        ("TSK", "degC", "K"): {"type": "conversion", "scale": 1.0,
+                               "offset": 273.15, "basis": "degC+273.15=K"},
+        ("TSK", "Kelvin", "K"): {"type": "alias", "basis": "spelling"},
+    }
+
+    def mutate_tsk_units(synth_root):
+        for path in a_files(synth_root):
+            with Dataset(path, "r+") as ds:
+                var = ds.variables["TSK"]
+                var[:] = var[:] - 273.15          # 数值改为 degC
+                var.units = "degC"
+        for path in sorted(synth_root.glob("B_6mem_oceanAssim1Run1_EAKF_006_d02.nc")):
+            with Dataset(path, "r+") as ds:
+                ds.variables["TSK"].units = "Kelvin"  # 拼写别名(数值不变)
+
+    out5 = patched_run(dataclasses.replace(
+        base_config, output_root=run_root, output_dirname="r4"
+    ), mutate_tsk_units)
+    pairwise5 = pd.read_csv(out5 / "verify04_pairwise_checks.csv", dtype={"member": str})
+    tsk_row = pairwise5[(pairwise5.stage_pair == "A-B") & (pairwise5.variable == "TSK")
+                        & (pairwise5.experiment == "6mem_oceanAssim1Run1")]
+    # B(K 拼写 Kelvin,数值不变)与 A(degC 数值,已转换)→ 差应为 0
+    check.expect(bool((tsk_row.status == "ok").all()),
+                 f"登记转换/别名后应可计算: {tsk_row.status.tolist()}")
+    check.expect(bool((tsk_row.mean_diff.abs() < 1e-9).all()),
+                 f"转换后强弱同值差应为 0(而非 -273.15): {tsk_row.mean_diff.tolist()}")
+    check.expect(bool(tsk_row.detail.str.contains("unit conversion applied").all()),
+                 "转换依据应写入 detail")
+    # 未登记的不匹配仍被拒绝
+    tsk_ia = pairwise5[(pairwise5.stage_pair == "I-A") & (pairwise5.variable == "OM_TMP")
+                       & (pairwise5.experiment == "6mem_oceanAssim1Run1")]
+    check.expect(bool((tsk_ia.status == "ok").all()),
+                 "未涉及单位登记的变量不受影响")
+    v04.UNIT_ALIASES = {}
+
+    # --- R5:必需语义放在键中但值为 unknown → unknown ---
+    from caliber_link import check_joinable
+
+    keys = ("method", "member", "time_hour", "experiment_or_cycle", "valid_time",
+            "variable", "unit", "vertical_layer", "metric_family",
+            "spatial_support")
+    row_unknown = {
+        "method": "EAKF", "member": "006", "time_hour": 0.5,
+        "experiment_or_cycle": "c0", "valid_time": "t0",
+        "variable": "unknown", "unit": "K", "vertical_layer": "surface",
+        "metric_family": "pair_difference", "spatial_support": "pointwise",
+    }
+    verdict = check_joinable(
+        pd.DataFrame([row_unknown]), pd.DataFrame([row_unknown]), keys, ()
+    )
+    check.expect(verdict.verdict.iloc[0] == "unknown",
+                 f"键中必需语义取值为 unknown 应判 unknown: {verdict.iloc[0].to_dict()}")
+
+    # --- R6:清单 mapping_confirmed 与 source_confirmed 分列 ---
+    def mutate_nothing(synth_root):
+        return None
+
+    out6 = patched_run(dataclasses.replace(
+        base_config, output_root=run_root, output_dirname="r6"
+    ), mutate_nothing, confirm_source=True, confirm_mapping=False)
+    manifest6 = pd.read_csv(out6 / "verify04_source_manifest.csv")
+    check.expect(bool((manifest6.source_confirmed == True).all()),   # noqa: E712
+                 "已确认来源的清单 source_confirmed 应为 True")
+    check.expect(bool((manifest6.mapping_confirmed == False).all()),  # noqa: E712
+                 "映射默认未确认:清单 mapping_confirmed 应为 False(与来源分列,"
+                 "R6:不再用来源确认冒充映射确认)")
+    check.expect("mapping_known" in manifest6.columns,
+                 "清单应含 mapping_known 列")
+    strong_known = manifest6[manifest6.experiment == "6mem_oceanAssim1Run1"]
+    weak_known = manifest6[manifest6.experiment == "6mem_oceanAssim0Run1"]
+    check.expect(bool((strong_known.mapping_known == True).all())    # noqa: E712
+                 and bool((weak_known.mapping_known == False).all()),  # noqa: E712
+                 "强试验映射已知(mapping_known=True);弱试验映射未知(False)")
+    # time_record_used 记录 Times 命中的实际记录号(R6 追溯);
+    # missing_variable 的行不解析时间,time_record_used 为 NaN(允许)
+    timed = manifest6[manifest6.time_source == "times_attribute"]
+    check.expect(len(timed) > 0
+                 and bool((timed.time_record_used == 0).all()),
+                 "Times 命中的记录号应写入 time_record_used")
+    # 来源确认 + 映射未确认 → I-A 结论 not_concluded_mapping_inferred_not_confirmed
+    pairwise6 = pd.read_csv(out6 / "verify04_pairwise_checks.csv", dtype={"member": str})
+    om_ia6 = pairwise6[(pairwise6.stage_pair == "I-A")
+                       & (pairwise6.variable == "OM_TMP")
+                       & (pairwise6.experiment == "6mem_oceanAssim1Run1")]
+    check.expect(bool((om_ia6.handoff_conclusion
+                       == "not_concluded_mapping_inferred_not_confirmed").all()),
+                 "来源确认而映射未确认应 not_concluded_mapping_inferred_not_confirmed")
+
+    # --- R2 附带:重复非层变量名在 run 开始即报错 ---
+    v04.CHECK_VARIABLES = (
+        v04.CheckVariable("TSK", "K", None, None, 1.0e-3, "tsk"),
+        v04.CheckVariable("TSK", "K", None, None, 1.0e-3, "tsk"),
+    )
+    try:
+        v04.run(dataclasses.replace(
+            base_config, output_root=run_root, output_dirname="dup"
+        ))
+        check.expect(False, "重复非层变量名应尽早报错")
+    except ValueError as error:
+        check.expect("duplicate non-layered variable" in str(error),
+                     f"重复变量名报错信息异常: {error}")
+    return check
+
+
+def check_caliber_link_manual() -> Check:
+    """模块 B:兼容性判定——必需语义缺失→unknown;块平均 vs 逐点、不同中心、
+    不同 SST 来源不误报可比;变量/单位不一致(T2 vs Q2)→ not_comparable;
+    单列键不被拆字符;重复键;前导零不静默归一;未匹配键可报告。"""
+    check = Check("caliber_link 兼容性判定")
+    from caliber_link import build_caliber_table, check_joinable, unmatched_keys
+
+    keys = ("method", "member", "time_hour")
+    meta = (
+        "experiment_or_cycle", "valid_time", "variable", "unit",
+        "vertical_layer", "metric_family", "spatial_support",
+        "center_definition", "sst_source",
+    )
+    common_meta = {
+        "experiment_or_cycle": "cycle_2018-09-10_00",
+        "valid_time": "2018-09-10_00:30:00",
+        "variable": "HFX",
+        "unit": "W m-2",
+        "vertical_layer": "surface",
+        "metric_family": "pair_difference",
+    }
+    pathway_style = pd.DataFrame({
+        **common_meta,
+        "method": ["EAKF"], "member": ["006"], "time_hour": [0.5],
+        "center_definition": ["pair_mean_psfc"],
+        "spatial_support": ["block_10x10"],
+        "sst_source": ["om_tmp_layer0_t0"],
+    })
+    verify_style = pd.DataFrame({
+        **common_meta,
+        "method": ["EAKF"], "member": ["006"], "time_hour": [0.5],
+        "center_definition": ["nr_psfc"],
+        "spatial_support": ["pointwise"],
+        "sst_source": ["tsk_each_time"],
+    })
+    verdict = check_joinable(pathway_style, verify_style, keys, meta)
+    check.expect(verdict.verdict.iloc[0] == "not_comparable"
+                 and "center_definition" in verdict.conflicts.iloc[0]
+                 and "spatial_support" in verdict.conflicts.iloc[0]
+                 and "sst_source" in verdict.conflicts.iloc[0],
+                 f"块平均/不同中心/不同 SST 来源应判 not_comparable: "
+                 f"{verdict.iloc[0].to_dict()}")
+    same = pd.DataFrame({**common_meta,
+                         "method": ["EAKF"], "member": ["006"], "time_hour": [0.5],
+                         "center_definition": ["nr_psfc"],
+                         "spatial_support": ["pointwise"],
+                         "sst_source": ["tsk_each_time"]})
+    verdict_same = check_joinable(same, verify_style, keys, meta)
+    check.expect(verdict_same.verdict.iloc[0] == "value_by_value",
+                 f"口径一致的表应可逐值比较: {verdict_same.verdict.iloc[0]}")
+    # 变量/单位不同的同键行(T2 vs Q2 反例)→ not_comparable
+    # (其余口径齐全,使冲突精确落在 variable/unit 上)
+    t2_vs_q2_left = pd.DataFrame({**common_meta, "variable": ["T2"], "unit": ["K"],
+                                  "method": ["EAKF"], "member": ["006"],
+                                  "time_hour": [0.5],
+                                  "center_definition": ["nr_psfc"],
+                                  "sst_source": ["tsk_each_time"],
+                                  "spatial_support": ["pointwise"]})
+    t2_vs_q2_right = pd.DataFrame({**common_meta, "variable": ["Q2"],
+                                   "unit": ["kg kg-1"],
+                                   "method": ["EAKF"], "member": ["006"],
+                                   "time_hour": [0.5],
+                                   "center_definition": ["nr_psfc"],
+                                   "sst_source": ["tsk_each_time"],
+                                   "spatial_support": ["pointwise"]})
+    verdict_var = check_joinable(t2_vs_q2_left, t2_vs_q2_right, keys, meta)
+    check.expect(verdict_var.verdict.iloc[0] == "not_comparable"
+                 and "variable" in verdict_var.conflicts.iloc[0]
+                 and "unit" in verdict_var.conflicts.iloc[0],
+                 f"T2 与 Q2 同键不应判可比: {verdict_var.iloc[0].to_dict()}")
+    # 空口径列且必需语义不在键中 → unknown(不默认放行)
+    verdict_empty = check_joinable(pathway_style, verify_style, keys, ())
+    check.expect(len(verdict_empty) > 0
+                 and (verdict_empty.verdict == "unknown").all()
+                 and verdict_empty.conflicts.iloc[0].startswith(
+                     "missing_required_semantics"),
+                 "空口径列且必需语义缺失应全部 unknown")
+    # 元数据部分缺失 → unknown
+    missing_meta = pd.DataFrame({
+        **common_meta, "method": ["EAKF"], "member": ["006"], "time_hour": [0.5],
+        "center_definition": ["nr_psfc"],
+    })
+    verdict_unknown = check_joinable(missing_meta, verify_style, keys, meta)
+    check.expect(verdict_unknown.verdict.iloc[0] == "unknown",
+                 f"口径部分缺失应 unknown: {verdict_unknown.verdict.iloc[0]}")
+    # 重复键 → duplicate_keys
+    dup = pd.concat([verify_style, verify_style], ignore_index=True)
+    verdict_dup = check_joinable(same, dup, keys, meta)
+    check.expect(verdict_dup.verdict.iloc[0] == "duplicate_keys",
+                 f"重复键应 duplicate_keys: {verdict_dup.verdict.iloc[0]}")
+    # 前导零不静默归一;未匹配键显式报告
+    nozfill = pd.DataFrame({
+        **common_meta, "method": ["EAKF"], "member": ["6"], "time_hour": [0.5],
+        "center_definition": ["nr_psfc"], "spatial_support": ["pointwise"],
+        "sst_source": ["tsk_each_time"],
+    })
+    verdict_zfill = check_joinable(verify_style, nozfill, keys, meta)
+    check.expect(len(verdict_zfill) == 0,
+                 "前导零不同的成员键不应被静默匹配")
+    unmatched = unmatched_keys(verify_style, nozfill, keys)
+    check.expect(len(unmatched) == 2
+                 and set(unmatched.side) == {"left_only", "right_only"},
+                 f"未匹配键应显式报告: {unmatched.to_dict('records')}")
+    # 单列键:字符串不被拆成首字符;整数键不报 TypeError
+    single_meta = ("variable", "unit", "vertical_layer", "metric_family",
+                   "spatial_support", "experiment_or_cycle", "valid_time")
+    single_left = pd.DataFrame({"member": ["006"], "variable": ["TSK"],
+                                "unit": ["K"], "vertical_layer": ["surface"],
+                                "metric_family": ["pair_difference"],
+                                "spatial_support": ["pointwise"],
+                                "experiment_or_cycle": ["c0"],
+                                "valid_time": ["t0"]})
+    verdict_single = check_joinable(single_left, single_left.copy(),
+                                    ("member",), single_meta)
+    check.expect(len(verdict_single) == 1 and verdict_single.member.iloc[0] == "006",
+                 f"单列键应保留原值: {verdict_single.member.tolist()}")
+    check.expect(verdict_single.verdict.iloc[0] == "value_by_value",
+                 f"单列键同口径应 value_by_value: {verdict_single.verdict.iloc[0]}")
+    single_int = single_left.copy()
+    single_int["member"] = [6]
+    check.expect(len(unmatched_keys(single_left, single_int, ("member",))) == 2,
+                 "字符串与整数键应视为不同键(不静默转换)")
+    # 对照表:四档判定 + 已知差异
+    table = build_caliber_table()
+    check.expect(set(table.verdict).issubset({
+        "value_by_value", "parallel_evidence", "not_comparable", "unknown",
+    }), "对照表判定超出四档")
+    check.expect(bool((table.dimension == "offline_flux_sst_source").any())
+                 and table.loc[table.dimension == "offline_flux_sst_source",
+                               "verdict"].iloc[0] == "not_comparable",
+                 "离线通量 SST 来源差异应判 not_comparable")
+    return check
+
+
+def check_verify04_end_to_end_real_mode_guard() -> Check:
+    """verify_04 真实模式防呆:B/A/I 真实路径默认未配置(文件名推断不自动
+    启用)、confirmed=False;F0 模板存在(独立断言)。"""
+    check = Check("verify_04 真实模式来源防呆")
+    from verify_04_initial_handoff import _resolve_stage_path, _stage_source_configs
+
+    real_config = VerifyConfig(
+        mode="real",
+        real=dataclasses.replace(
+            VerifyConfig().real, acknowledge_real_mode=True
+        ),
+    )
+    sources = _stage_source_configs(real_config)
+    for stage in ("B", "A", "I"):
+        check.expect(sources[stage].path_template is None,
+                     f"{stage} 真实路径默认应未配置")
+        check.expect(sources[stage].confirmed is False,
+                     f"{stage} 的 confirmed 标记应为 False")
+    check.expect(sources["F0"].path_template is not None,
+                 "F0 模板应存在(服务器已核实的 wrfout 布局)")
+    check.expect(isinstance(sources["F0"].confirmed, bool),
+                 "F0 confirmed 应为布尔值")
+    check.expect(_resolve_stage_path(None, "d02", "006", "t") is None,
+                 "未配置模板应解析为 None(比较按 source_not_configured 跳过)")
+    return check
+
+
 def check_lltoxy_registration() -> Check:
     """ll_to_xy 投影配准路径(mock 投影文件):此前该路径从未被任何测试执行。
 
@@ -1811,6 +2678,13 @@ def main() -> int:
         check_real_provider_contract,
         check_char_array_times,
         check_lltoxy_registration,
+        check_verify04_handoff_manual,
+        check_verify04_stage_skips,
+        check_caliber_link_manual,
+        check_verify04_unit_fill_grid_gates,
+        check_verify04_mapping_conclusion,
+        check_verify04_round2_fixes,
+        check_verify04_end_to_end_real_mode_guard,
         check_joint_mask_numeric_counterexample,
         check_joint_tiered_counts,
         check_joint_quality_flagging,

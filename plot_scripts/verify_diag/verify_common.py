@@ -500,17 +500,8 @@ def _inside_footprint(footprint, dst_lat_deg: np.ndarray, dst_lon_deg: np.ndarra
 
 
 def _grids_identical(lat_a, lon_a, lat_b, lon_b, atol: float = 1.0e-12) -> bool:
-    """完整几何一致性校验:形状与全部经纬度逐点一致。"""
-    lat_a = np.asarray(lat_a, dtype=float)
-    lon_a = np.asarray(lon_a, dtype=float)
-    lat_b = np.asarray(lat_b, dtype=float)
-    lon_b = np.asarray(lon_b, dtype=float)
-    if lat_a.shape != lat_b.shape or lon_a.shape != lon_b.shape:
-        return False
-    return bool(
-        np.array_equal(lat_a, lat_b, equal_nan=True)
-        and np.array_equal(lon_a, lon_b, equal_nan=True)
-    )
+    """兼容入口:公共实现在 grids_identical。"""
+    return grids_identical(lat_a, lon_a, lat_b, lon_b, atol=atol)
 
 
 def _build_source_index(src_lat2d, src_lon2d) -> dict:
@@ -779,6 +770,151 @@ def align_times_to_hours(frame: pd.DataFrame, hours) -> pd.DataFrame:
         return pd.DataFrame({"time_hour": list(hours)}).set_index("time_hour")
     indexed = frame.set_index("time_hour")
     return indexed.reindex(pd.Index(list(hours), name="time_hour"))
+
+
+def difference_stats(diff: np.ndarray, base_mask: np.ndarray, tolerance: float) -> dict:
+    """统一掩膜上差值场的统计(verify_04 初值传递核验用)。
+
+    diff   = X_a - X_b(或 I - A 等阶段差;由调用方保证方向)
+    base_mask = 参与比较的基础掩膜(区域/海洋等,调用方构建)
+    tolerance = 超容差判定的阈值(单位与差值一致;只影响计数,不改数值)
+
+    返回:n_base(基础掩膜点数)、n_valid(有限点数)、n_missing(掩膜内非有限)、
+    mean_diff(差异均值)、rms_diff(差值均方根,**不是标准差**)、
+    max_abs_diff、n_over_tolerance、frac_over_tolerance(分母 = n_valid)、
+    status(ok / empty_mask / all_nan_inside_mask)。
+    空掩膜/全 NaN 返回 NaN 数值并给出状态,不填零、不判通过。
+    """
+    diff = np.asarray(diff, dtype=float)
+    base = np.asarray(base_mask, dtype=bool)
+    n_base = int(np.count_nonzero(base))
+    nan_result = {
+        "n_base": n_base, "n_valid": 0,
+        "n_missing": n_base,
+        "mean_diff": np.nan, "rms_diff": np.nan, "max_abs_diff": np.nan,
+        "n_over_tolerance": 0, "frac_over_tolerance": np.nan,
+        "status": "empty_mask" if n_base == 0 else "all_nan_inside_mask",
+    }
+    finite = base & np.isfinite(diff)
+    n_valid = int(np.count_nonzero(finite))
+    if n_valid == 0:
+        return nan_result
+    data = diff[finite]
+    over = int(np.count_nonzero(np.abs(data) > float(tolerance)))
+    return {
+        "n_base": n_base,
+        "n_valid": n_valid,
+        "n_missing": n_base - n_valid,
+        "mean_diff": float(np.mean(data)),
+        "rms_diff": float(np.sqrt(np.mean(data ** 2))),
+        "max_abs_diff": float(np.max(np.abs(data))),
+        "n_over_tolerance": over,
+        "frac_over_tolerance": over / n_valid,
+        "status": "ok",
+    }
+
+
+def stage_difference_stats(
+    values_a: np.ndarray,
+    values_b: np.ndarray,
+    base_mask: np.ndarray,
+    tolerance: float,
+    fill_threshold: float = 1.0e30,
+) -> dict:
+    """两值阶段差统计(verify_04 初值传递核验;d = A − B 由调用方保证方向)。
+
+    基础掩膜独立于数值有效性:base_mask 只含区域/海洋等比较范围约定,
+    不因缺测收缩;缺测与填充在相减前按侧识别(审查 P1#2):
+      - 无效/缺测:非有限值;
+      - 填充值:|x| >= fill_threshold(缺测相减为零的相消被显式暴露);
+    有效点 = base_mask & 两侧均非缺失且非填充。
+
+    返回:n_base(基础掩膜点数,不随缺测收缩)、n_valid、n_missing(基础内
+    任一侧缺失/无效/填充的点数)、n_missing_left/right(按侧)、n_fill
+    (任一侧为填充量级的点数)、mean_diff/rms_diff(差值均方根,非标准差)/
+    max_abs_diff、n_over_tolerance、frac_over_tolerance(分母 = n_valid)、
+    status(ok / empty_mask / all_nan_inside_mask)。
+    空掩膜/全 NaN 返回 NaN 数值并给出状态,不填零、不判通过。
+    """
+    a = np.asarray(values_a, dtype=float)
+    b = np.asarray(values_b, dtype=float)
+    base = np.asarray(base_mask, dtype=bool)
+    n_base = int(np.count_nonzero(base))
+    if a.shape != b.shape:
+        raise ValueError(
+            f"stage_difference_stats: shape mismatch {a.shape} vs {b.shape}"
+        )
+
+    def usable(values: np.ndarray) -> np.ndarray:
+        return np.isfinite(values) & (np.abs(values) < float(fill_threshold))
+
+    usable_a = usable(a)
+    usable_b = usable(b)
+    valid = base & usable_a & usable_b
+    n_valid = int(np.count_nonzero(valid))
+    n_missing_left = int(np.count_nonzero(base & ~usable_a))
+    n_missing_right = int(np.count_nonzero(base & ~usable_b))
+    n_fill = int(np.count_nonzero(
+        base & ((np.abs(a) >= float(fill_threshold)) | (np.abs(b) >= float(fill_threshold)))
+        & np.isfinite(a) & np.isfinite(b)
+    ))
+    result = {
+        "n_base": n_base,
+        "n_valid": n_valid,
+        "n_missing": n_base - n_valid,
+        "n_missing_left": n_missing_left,
+        "n_missing_right": n_missing_right,
+        "n_fill": n_fill,
+        "mean_diff": np.nan, "rms_diff": np.nan, "max_abs_diff": np.nan,
+        "n_over_tolerance": 0, "frac_over_tolerance": np.nan,
+        "status": "empty_mask" if n_base == 0 else "all_nan_inside_mask",
+    }
+    if n_valid == 0:
+        return result
+    data = (a - b)[valid]
+    over = int(np.count_nonzero(np.abs(data) > float(tolerance)))
+    result.update({
+        "mean_diff": float(np.mean(data)),
+        "rms_diff": float(np.sqrt(np.mean(data ** 2))),
+        "max_abs_diff": float(np.max(np.abs(data))),
+        "n_over_tolerance": over,
+        "frac_over_tolerance": over / n_valid,
+        "status": "ok",
+    })
+    return result
+
+
+def decode_wrf_time_stamp(stamp) -> str:
+    """解码 WRF Times 变量的三种存储形式:VLEN 字符串、bytes、S1 字符数组。
+
+    对 (Time, DateStrLen) 的 S1 字符数组必须逐元素拼接;
+    直接 str() 会得到 "[b'2' b'0' ...]" 而永远匹配失败。
+    """
+    if isinstance(stamp, np.ndarray):
+        parts = []
+        for item in stamp.tolist():
+            if isinstance(item, (bytes, np.bytes_)):
+                parts.append(item.decode("utf-8", errors="replace"))
+            else:
+                parts.append(str(item))
+        return "".join(parts).strip()
+    if isinstance(stamp, (bytes, np.bytes_)):
+        return stamp.decode("utf-8", errors="replace").strip()
+    return str(stamp).strip()
+
+
+def grids_identical(lat_a, lon_a, lat_b, lon_b, atol: float = 1.0e-12) -> bool:
+    """完整网格一致性校验:形状与全部经纬度逐点一致(NaN 视为相等)。"""
+    lat_a = np.asarray(lat_a, dtype=float)
+    lon_a = np.asarray(lon_a, dtype=float)
+    lat_b = np.asarray(lat_b, dtype=float)
+    lon_b = np.asarray(lon_b, dtype=float)
+    if lat_a.shape != lat_b.shape or lon_a.shape != lon_b.shape:
+        return False
+    return bool(
+        np.array_equal(lat_a, lat_b, equal_nan=True)
+        and np.array_equal(lon_a, lon_b, equal_nan=True)
+    )
 
 
 def member_then_mean(frame: pd.DataFrame, column: str, members) -> float:
@@ -1683,29 +1819,15 @@ class RealWrfProvider:
 
     @staticmethod
     def _decode_wrf_time(stamp) -> str:
-        """解码 WRF Times 变量的三种存储形式:VLEN 字符串、bytes、S1 字符数组。
-
-        对 (Time, DateStrLen) 的 S1 字符数组,Times[0] 是 bytes/str 元素数组,
-        必须逐元素拼接;直接 str() 会得到 "[b'2' b'0' ...]" 而永远匹配失败。
-        """
-        if isinstance(stamp, np.ndarray):
-            parts = []
-            for item in stamp.tolist():
-                if isinstance(item, (bytes, np.bytes_)):
-                    parts.append(item.decode("utf-8", errors="replace"))
-                else:
-                    parts.append(str(item))
-            return "".join(parts).strip()
-        if isinstance(stamp, (bytes, np.bytes_)):
-            return stamp.decode("utf-8", errors="replace").strip()
-        return str(stamp).strip()
+        """兼容入口:解码逻辑在 verify_common.decode_wrf_time_stamp。"""
+        return decode_wrf_time_stamp(stamp)
 
     def _validate_file_time(self, dataset, path: Path, time_name: str) -> None:
         """校验文件内 Times 属性与请求时刻一致(不能只靠文件名)。"""
         if "Times" not in dataset.variables:
             raise RuntimeError(f"{path} 缺少 Times 变量,无法校验有效时间")
         stamp = dataset.variables["Times"][0]
-        text = self._decode_wrf_time(stamp)
+        text = decode_wrf_time_stamp(stamp)
         if text != time_name:
             raise RuntimeError(f"{path} 有效时间 {text!r} 与请求时刻 {time_name!r} 不符")
 
