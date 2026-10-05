@@ -1,15 +1,14 @@
-"""诊断四:初值传递核验(B → A → I,及独立的 F0)(SYNTHETIC 默认)。
+"""诊断四:初值传递核验(B → A → I;A 即试验 0h 输出)(默认真实模式)。
 
 最小实现,复用 verify_common 与 pathway/verify_diag 已有能力。核验三组显式
 区分的差异(字段名不混用):
 
-    d_assim   = A - B              同化增量(同化前背景 -> 同化后分析)
+    d_assim   = A - B              同化增量(A 为试验 0h 输出)
     d_handoff = I - A              分析到 WRF 实际启动状态的差
     d_pair    = X_strong - X_weak  强弱试验差(各阶段分别计算)
 
 阶段契约(P1 #3 修正):B/A/I 属于**起报循环**,只在该循环的有效时间
-(INIT_TIME_NAME)核验;F0 是 0h 预报输出,仅做 F0-I 的描述性比较,
-不能替代前三者;lead time 不充当 cycle。无 Times 的文件必须显式配置
+(INIT_TIME_NAME)核验;lead time 不充当 cycle。无 Times 的文件必须显式配置
 记录号(缺省 None,不盲目取第 0 条)。
 
 计算资格与结论分离(审查 P1 #1/#5):
@@ -25,7 +24,7 @@
 
 输出(空输入也生成带列名的表):
     verify04_source_manifest.csv      逐读取请求的来源与元数据
-    verify04_pairwise_checks.csv      阶段差(d_assim/d_handoff/F0-I)
+    verify04_pairwise_checks.csv      阶段差(d_assim/d_handoff)
     verify04_initial_pair_checks.csv  强弱初值差(d_pair)
     verify04_coverage.csv             预期/实际/缺失覆盖
     verify04_status.csv               成功/跳过/失败及原因
@@ -66,7 +65,7 @@ CONFIG = VerifyConfig(
     plot_regions=(),  # 本诊断不绘图
 )
 
-#: 起报循环的有效时间(B/A/I 与 F0 的核验时刻;lead time 不充当 cycle)
+#: 起报循环的有效时间(B/A/I 的核验时刻;lead time 不充当 cycle)
 INIT_TIME_NAME = "2018-09-10_00:00:00"
 #: 循环标识(写入输出,便于多循环扩展;每循环需独立运行并配置阶段来源)
 CYCLE_ID = "cycle_2018-09-10_00"
@@ -109,7 +108,13 @@ POST_MAPPING_STEPS = ("update_wrf_bc (boundary); "
 #:     数值转换:file_unit 值 * s + o = expected_unit 值,先转换再比较,
 #:     并在 detail 记录依据;
 #:   其他类型在运行时拒绝(不为未实现的转换放行)。
-UNIT_ALIASES: dict[tuple[str, str, str], dict] = {}
+#: 已登记:OM_TMP 的 units 在 DART/海洋文件与 wrfinput/wrfout 中写作小写 "k",
+#: 与期望 "K" 为大小写拼写差异、数值恒等(alias 不改变数值,仅放行)。
+UNIT_ALIASES: dict[tuple[str, str, str], dict] = {
+    ("OM_TMP", "k", "K"): {"type": "alias",
+                           "basis": "case spelling: all DART/ocean files write "
+                                    "lowercase 'k'; numerically identical to K"},
+}
 
 
 #: 检查变量配置:name, unit(配置期望单位), layer(None=表面/2D),
@@ -172,26 +177,17 @@ STAGE_SOURCE_DEFAULTS = {
     ),
     "A": StageSource(
         stage="A",
-        path_template="/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/"
-                      "2DART/run_dir/inflatedOcean/output_{domain}.mem{member}",
-        time_in_path=False,
-        mapping_basis="post-assimilation state after ocean inflation "
-                      "(inflatedOcean copy, 2026-10-04 13:37): OM_TMP verified "
-                      "I-A=0 exactly on 2026-10-05. PROVENANCE FINDING: its "
-                      "ATMOSPHERE is the pre-assimilation prior (QVAPOR I-A "
-                      "differs everywhere by up to 0.004 kg/kg = the analysis "
-                      "increment; T/U likewise; consistent with this file "
-                      "holding prior atmosphere + inflated ocean), so "
-                      "ATMOSPHERE d_assim from this file reads ~0 and is NOT "
-                      "the assimilation increment - the true posterior "
-                      "atmosphere (run_dir/output) is deleted by the driver "
-                      "after each cycle. The archived "
-                      "postAnal_EAKF/d01_10_00_00/analysis_d02.mem006 is an "
-                      "older generation (differs from I: OM_TMP +0.033, "
-                      "TSK +0.957) and is NOT the current launch-state source",
-        confirmed=True, format="dart_output_inflated",
-        inferred_template="postAnal_{method}/d01_{cycletime}/analysis_d{domain}."
-                          "{member} 为归档分析(上一代,与当前启动场不同代)",
+        path_template=str(vc.REAL_FORECAST_BASE_DIR / "{experiment}" / "{method}"
+                          / "{member}" / "wrfout_{domain}_{time}"),
+        time_in_path=True,
+        mapping_basis="the experiment's 0h forecast output = the post-"
+                      "assimilation launch state (analysis renamed to wrfinput, "
+                      "then output by WRF at t=0); verified 2026-10-05: "
+                      "OM_TMP/TSK I-A=0 exactly on all 800000 points "
+                      "(user-confirmed semantics)",
+        confirmed=True, format="wrfout",
+        inferred_template="即 cycle_test/{experiment}/{method}/{member}/ 的 "
+                          "wrfout_{domain} 起报时刻输出",
     ),
     "I": StageSource(
         stage="I",
@@ -205,17 +201,6 @@ STAGE_SOURCE_DEFAULTS = {
         inferred_template="run_wrf/{cycletime}/{member}/wrfinput_d{domain}"
                           "(目录名 10_00_00 为 MM_DD_HH 格式;注意该目录按"
                           "成员共享,后运行的试验会覆盖先前的 wrfinput)",
-    ),
-    "F0": StageSource(
-        stage="F0",
-        path_template=str(vc.REAL_FORECAST_BASE_DIR / "{experiment}" / "{method}"
-                          / "{member}" / "wrfout_{domain}_{time}"),
-        time_in_path=True,
-        mapping_basis="forecast output at 0h; descriptive comparison only "
-                      "(verified readable on 2026-10-05: 192 manifest rows "
-                      "exists=yes, Times matched)",
-        confirmed=True, format="wrfout",
-        inferred_template="wrfout_{domain}_{time} under cycle_test (server-verified layout)",
     ),
 }
 
@@ -347,8 +332,7 @@ def _handoff_conclusion(stage_pair: str, stats_status: str,
     (共同有效点内一致),不把未核验点算作已验证一致。
     """
     if stage_pair != "I-A":
-        return ("descriptive_not_a_handoff_check" if stage_pair == "F0-I"
-                else "n/a (not a handoff comparison)")
+        return "n/a (not a handoff comparison)"
     if stats_status != "ok":
         return f"not_concluded:{stats_status}"
     if not grid_verified:
@@ -370,11 +354,11 @@ def _handoff_conclusion(stage_pair: str, stats_status: str,
 
 
 def _write_synthetic_inputs(config: VerifyConfig) -> Path:
-    """生成合成 B/A/I/F0 NetCDF(固定种子;Times 含全部配置时次)。
+    """生成合成 B/A/I NetCDF(固定种子;Times 含全部配置时次)。
 
     场景(供手算核验,与冒烟测试断言对应):
     - OM_TMP:B 为基准;A = B + 同化增量(部分格点 ±0.5,均值 5/48);
-      I = A(映射 M 内变量交接精确);F0 = I;
+      I = A(映射 M 内变量交接精确);
     - TSK:各阶段同值(模拟「OM_TMP 被同化改变而 TSK 未被更新」);
     - 大气变量:强弱试验的 I 完全相同(一致性检查预期≈0),B/A 各自不同;
     - SST 刻意缺失(检验 missing_variable 状态);
@@ -413,7 +397,6 @@ def _write_synthetic_inputs(config: VerifyConfig) -> Path:
                     "B": {"OM_TMP": om_b, "TSK": tsk, "atmo": atmo_b},
                     "A": {"OM_TMP": om_a, "TSK": tsk, "atmo": atmo_a},
                     "I": {"OM_TMP": om_a, "TSK": tsk, "atmo": atmo_i},
-                    "F0": {"OM_TMP": om_a, "TSK": tsk, "atmo": atmo_i},
                 }
                 for stage, fields in stages.items():
                     path = synth_root / (
@@ -628,12 +611,12 @@ def run(config: VerifyConfig = CONFIG) -> Path:
             f"INIT_TIME_NAME {INIT_TIME_NAME!r} 不在 config.times 中,无法确定 time_hour"
         )
     n_members_cfg = len(config.members)
-    stages = ("B", "A", "I", "F0")
+    stages = ("B", "A", "I")
 
     for method in config.methods:
         # 预期比较数(起报时次契约:每方法每成员各一次;A-B/I-A 含强弱两试验)
         for var in CHECK_VARIABLES:
-            for stage_pair in ("A-B", "I-A", "F0-I"):
+            for stage_pair in ("A-B", "I-A"):
                 register_expected(stage_pair, var.name, method, units=2)
             for stage in stages:
                 register_expected(f"pair@{stage}", var.name, method, units=1)
@@ -687,14 +670,13 @@ def run(config: VerifyConfig = CONFIG) -> Path:
                         manifest_rows.append(manifest)
                         reads[(stage, experiment, var.name, var.layer)] = read
 
-            # ---- d_assim = A - B / d_handoff = I - A / F0-I(逐试验)----
+            # ---- d_assim = A - B / d_handoff = I - A(逐试验)----
             for experiment in (config.strong_experiment, config.weak_experiment):
                 mapping = MAPPING_SPECS.get(experiment)
                 for var in CHECK_VARIABLES:
                     for stage_pair, later, earlier in (
                         ("A-B", "A", "B"),
                         ("I-A", "I", "A"),
-                        ("F0-I", "F0", "I"),
                     ):
                         cov = coverage_key(stage_pair, var.name, method)
                         read_later = reads.get((later, experiment, var.name, var.layer))
@@ -810,9 +792,6 @@ def run(config: VerifyConfig = CONFIG) -> Path:
                             if stats["n_fill"]:
                                 detail = (detail + ";" if detail else "") + \
                                     "fill-magnitude values detected"
-                        elif stage_pair == "F0-I":
-                            detail = (detail + ";" if detail else "") + \
-                                "descriptive: F0 is forecast output, not a handoff check"
                         if var.staggered:
                             # R1:网格未核验时不给一致性结论,仅保留标记
                             detail = "grid_unverified_staggered"

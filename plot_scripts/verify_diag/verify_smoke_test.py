@@ -1557,8 +1557,8 @@ def check_verify04_stage_skips() -> Check:
     check.expect(bool(~u_pair.detail.str.contains("consistent").all()),
                  "网格未核验时不得输出大气一致性结论")
     # 清单:四阶段逐文件记录,路径含 experiment/method
-    check.expect(set(manifest.stage.unique()) == {"B", "A", "I", "F0"},
-                 "来源清单应覆盖 B/A/I/F0 四阶段")
+    check.expect(set(manifest.stage.unique()) == {"B", "A", "I"},
+                 "来源清单应覆盖 B/A/I 三阶段(F0 已并入 A)")
     check.expect(bool(manifest.path.str.contains("6mem_oceanAssim1Run1_EAKF_006").any()),
                  "清单路径应含 experiment/method 信息(来源可追溯)")
     # 口径表存在且包含全部维度
@@ -2171,7 +2171,7 @@ def check_caliber_link_manual() -> Check:
 
 
 def check_verify04_end_to_end_real_mode_guard() -> Check:
-    """verify_04 真实模式配置:B/A/I/F0 路径均已按服务器核实结果配置并
+    """verify_04 真实模式配置:B/A/I 路径均已按服务器核实结果配置并
     confirmed=True(2026-10-05 只读核验);模板含 {domain}/{member} 占位符。"""
     check = Check("verify_04 真实模式配置(已核实路径)")
     from verify_04_initial_handoff import _resolve_stage_path, _stage_source_configs
@@ -2183,7 +2183,7 @@ def check_verify04_end_to_end_real_mode_guard() -> Check:
         ),
     )
     sources = _stage_source_configs(real_config)
-    for stage in ("B", "A", "I", "F0"):
+    for stage in ("B", "A", "I"):
         check.expect(sources[stage].path_template is not None,
                      f"{stage} 真实路径应已配置")
         check.expect(sources[stage].confirmed is True,

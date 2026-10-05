@@ -622,3 +622,17 @@ git diff 一致);四入口脚本默认模式现已统一为 real。同步过程�
   归档的 postAnal 分析文件或未来的 output 存档;
 - inflatedOcean 副本与启动场均为 2026-10-04 重跑产物(13:37/14:29);
   postAnal 归档为更早代际(与当前启动场差 OM_TMP +0.033、TSK +0.957)。
+
+
+## 附:verify_04 的 A 阶段定义更正与 F0 移除(2026-10-05,用户澄清后)
+
+用户澄清并经数据验证:A 即试验自己的 0h 输出
+(`cycle_test/{试验}/{方法}/{成员}/wrfout_d02_2018-09-10_00:00:00`,
+本质上= analysis 改名 wrfinput 后被 WRF 输出),与 I(wrfinput)在全部
+800000 点逐位一致(OM_TMP/TSK 均验证)。此前指向 inflatedOcean 副本的
+A 定义有误(其大气为同化前先验),已更正;F0 独立阶段随之取消
+(F0-I 与 I-A 恒等)。`STAGE_SOURCE_DEFAULTS` 的 A 模板改为
+cycle_test wrfout 布局;阶段差仅保留 A-B(总初值变化,含同化/TSK 更新/
+传递的合计;纯 DART 增量在 inc 文件中,为 6 月 22 日旧代际,列为局限)。
+单位门控在真实数据上生效:OM_TMP 的小写 "k" units 已按用户同意登记为
+拼写别名(数值恒等,放行不改数值)。冒烟测试 51/51 通过。
