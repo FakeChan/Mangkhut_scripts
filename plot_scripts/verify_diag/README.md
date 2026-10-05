@@ -14,7 +14,7 @@
 | `verify_02_flux_error_budget.py` | 诊断二:通量误差变化的精确分解(交叉项/平方项/闭合残差) |
 | `verify_03_fixed_atmosphere_flux.py` | 诊断三:固定大气海温替换(阶段 A 重建一致性 + 阶段 B 条件替换) |
 | `verify_synthetic.py` | 合成数据生成器(SYNTHETIC ONLY,固定种子,内存数据,不触任何真实文件) |
-| `verify_04_initial_handoff.py` | 诊断四:初值传递核验(B→A→I,及独立 F0;d_assim/d_handoff/d_pair 三组差值严格分名);默认真实模式(与 01–03 一致),真实 B/A/I 路径需在其配置区确认 |
+| `verify_04_initial_handoff.py` | 诊断四:初值传递核验(B→A→I,及独立 F0;d_assim/d_handoff/d_pair 三组差值严格分名);默认真实模式,B/A/I/F0 路径已于 2026-10-05 服务器只读核验并填入配置(绑定 10_00_00 循环) |
 | `verify04_readers.py` | 小型 NetCDF 读取适配:按维度名称与 Times 属性定时间、网格一致性校验、无插值 |
 | `caliber_link.py` | 模块 B:pathway vs verify_diag 口径对照表与连接兼容性判定(unknown 默认) |
 | `REVIEW_SOURCES_AND_CALIBER.md` | 代码层审查:四阶段来源关系(含证据行号)、update_tsk_from_omtmp 审查、口径差异 |

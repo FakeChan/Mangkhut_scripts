@@ -591,3 +591,34 @@ real=RealPathConfig(acknowledge_real_mode=True),无其他改动(与服务器
 git diff 一致);四入口脚本默认模式现已统一为 real。同步过程中曾因一次
 失败的 ssh 抓取把本地三文件截断为 0 字节,已从 git HEAD 恢复后用服务器
 版本覆盖(最终内容以服务器为准,经 diff 与编译复核)。
+
+
+## 附:verify_04 阶段路径的服务器只读核验(2026-10-05,续前)
+
+应用户确认 ensmem_dir 指向 `0mem_all_time/cyclingDA/10_00_00/firstguess_d{domain}.{member}`,
+并经 DART `input_list_d01/d02.txt` 最终核实(B 路径逐条一致)。同时定位并核验:
+
+- A(合并后分析):`/scratch/.../5cyclingDA/postAnal_{EAKF,QCF_RHF}/d01_10_00_00/`
+  `analysis_d{domain}.{member}`(方法各有);另有 `inflatedOcean/output_d{domain}.mem{member}`
+  (海洋膨胀副本,其 OM_TMP 与启动场逐位一致);
+- I(启动场):`/share/home/.../5cyclingDA/run_wrf/10_00_00/{member}/wrfinput_d{domain}`;
+- 全部 6 成员 × (B/A_EAKF/A_QCF/I/F0) 文件存在性核验通过,模板已填入
+  `STAGE_SOURCE_DEFAULTS`(confirmed=True)。
+
+只读探针的物理层发现(真实数据,mem006/EAKF 为例):
+
+- **OM_TMP 表层:I − A = 0(全域 800000 点精确为零)** —— 用户声称
+  「同化后 OM_TMP 与启动场完全一致」得到文件级验证;A − B 均值 −0.027 K
+  (海洋点),即同化+膨胀使 OM_TMP 平均降低约 0.03 K,I − B = +0.0065 K;
+- **TSK:I(TSK) = B(TSK)(海洋点精确相等)** —— TSK 不在 DART 状态变量中
+  (A 文件无 TSK,38 变量),ncks 清单也不含 TSK;且 cyclingDA 顶层 B 副本的
+  TSK == OM_TMP 表层(海洋点精确相等),证实 `update_tsk_from_omtmp.py`
+  在该副本上执行过——「OM_TMP 变而 TSK 不变」是设计行为;
+- **QVAPOR(及 T/U):I 与 inflatedOcean 副本不一致(全域,最大 0.004 kg/kg)**
+  —— 证据指向 inflatedOcean 文件的大气部分为**同化前先验**(其差值量级
+  恰为分析增量),即该文件 = 先验大气 + 膨胀海洋;真正的同化后大气
+  (run_dir/output)被驱动在循环末删除。因此 verify_04 对大气变量的
+  d_assim 若使用此文件会读出 ~0,不构成同化增量;大气侧增量需要
+  归档的 postAnal 分析文件或未来的 output 存档;
+- inflatedOcean 副本与启动场均为 2026-10-04 重跑产物(13:37/14:29);
+  postAnal 归档为更早代际(与当前启动场差 OM_TMP +0.033、TSK +0.957)。

@@ -153,34 +153,67 @@ class StageSource:
     time_record_basis: str = ""
 
 
+#: 2018091000 循环(10_00_00)的阶段路径,已于 2026-10-05 在服务器上以只读
+#: 方式核验:B 由 DART input_list_d01/d02.txt 确认(用户确认 + 清单核对);
+#: A/I 由探测确认(OM_TMP 表层 I-A 全域精确为 0;文件日期与重跑链一致)。
+#: 注意:该配置绑定 10_00_00 单一循环;多循环需按循环分别配置。
 STAGE_SOURCE_DEFAULTS = {
     "B": StageSource(
-        stage="B", path_template=None, time_in_path=False,
-        mapping_basis="DART prior, linked as wrfinput (driver_DART_cyclingDA.sh:83)",
-        confirmed=False, format="wrfinput",
-        inferred_template="firstguess_d{domain}.{member}(目录因试验而异)",
+        stage="B",
+        path_template="/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/"
+                      "0mem_all_time/cyclingDA/10_00_00/firstguess_{domain}.mem{member}",
+        time_in_path=False,
+        mapping_basis="DART prior per input_list_d01/d02.txt (user-confirmed; "
+                      "this copy has TSK==OM_TMP surface on ocean, i.e. "
+                      "update_tsk_from_omtmp was applied)",
+        confirmed=True, format="wrfinput",
+        inferred_template="同路径(cyclingDA/10_00_00;EAKF/ 子目录的 07-06 副本"
+                          " TSK 未同步,非 input_list 指向的先验)",
     ),
     "A": StageSource(
-        stage="A", path_template=None, time_in_path=False,
-        mapping_basis="posterior merged analysis file = firstguess-format + "
-                      "ncks-updated variables (analysis_d{domain}.{member}); "
-                      "raw DART posterior is output_d{domain}.{member}",
-        confirmed=False, format="wrfinput_merged_analysis",
-        inferred_template="analysis_d{domain}.{member}(post_anal_dir,布局未确认)",
+        stage="A",
+        path_template="/share/home/lililei1/kcfu/tc_mangkhut/4assimilation/"
+                      "2DART/run_dir/inflatedOcean/output_{domain}.mem{member}",
+        time_in_path=False,
+        mapping_basis="post-assimilation state after ocean inflation "
+                      "(inflatedOcean copy, 2026-10-04 13:37): OM_TMP verified "
+                      "I-A=0 exactly on 2026-10-05. PROVENANCE FINDING: its "
+                      "ATMOSPHERE is the pre-assimilation prior (QVAPOR I-A "
+                      "differs everywhere by up to 0.004 kg/kg = the analysis "
+                      "increment; T/U likewise; consistent with this file "
+                      "holding prior atmosphere + inflated ocean), so "
+                      "ATMOSPHERE d_assim from this file reads ~0 and is NOT "
+                      "the assimilation increment - the true posterior "
+                      "atmosphere (run_dir/output) is deleted by the driver "
+                      "after each cycle. The archived "
+                      "postAnal_EAKF/d01_10_00_00/analysis_d02.mem006 is an "
+                      "older generation (differs from I: OM_TMP +0.033, "
+                      "TSK +0.957) and is NOT the current launch-state source",
+        confirmed=True, format="dart_output_inflated",
+        inferred_template="postAnal_{method}/d01_{cycletime}/analysis_d{domain}."
+                          "{member} 为归档分析(上一代,与当前启动场不同代)",
     ),
     "I": StageSource(
-        stage="I", path_template=None, time_in_path=True,
+        stage="I",
+        path_template="/share/home/lililei1/kcfu/tc_mangkhut/5cyclingDA/run_wrf/"
+                      "10_00_00/{member}/wrfinput_{domain}",
+        time_in_path=True,
         mapping_basis="ncks-merged firstguess moved to wrfinput + update_wrf_bc "
-                      "+ ad_omini (run_driver_6mem_cyclingDA.sh:307-320)",
-        confirmed=False, format="wrfinput",
-        inferred_template="run_wrf/{time}/{member}/wrfinput_d{domain}",
+                      "+ ad_omini (run_driver_6mem_cyclingDA.sh:307-320); "
+                      "verified exists (2026-10-04 14:29, from the Oct-4 rerun)",
+        confirmed=True, format="wrfinput",
+        inferred_template="run_wrf/{cycletime}/{member}/wrfinput_d{domain}"
+                          "(目录名 10_00_00 为 MM_DD_HH 格式;注意该目录按"
+                          "成员共享,后运行的试验会覆盖先前的 wrfinput)",
     ),
     "F0": StageSource(
         stage="F0",
         path_template=str(vc.REAL_FORECAST_BASE_DIR / "{experiment}" / "{method}"
                           / "{member}" / "wrfout_{domain}_{time}"),
         time_in_path=True,
-        mapping_basis="forecast output at 0h; descriptive comparison only",
+        mapping_basis="forecast output at 0h; descriptive comparison only "
+                      "(verified readable on 2026-10-05: 192 manifest rows "
+                      "exists=yes, Times matched)",
         confirmed=True, format="wrfout",
         inferred_template="wrfout_{domain}_{time} under cycle_test (server-verified layout)",
     ),

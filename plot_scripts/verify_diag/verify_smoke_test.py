@@ -1530,11 +1530,17 @@ def check_verify04_stage_skips() -> Check:
     # 起报时次契约:全部比较只在 INIT_TIME_NAME 上(lead time 不充当 cycle)
     check.expect(set(pairwise.valid_time.unique()) == {"2018-09-10_00:00:00"},
                  "比较应只在起报循环有效时间上进行")
-    # 映射/来源门控:数值 ok 但结论未定(来源默认未确认)
+    # 映射/来源门控:来源已确认(STAGE_SOURCE_DEFAULTS confirmed=True),
+    # 结论推进到映射层:强试验映射推断未确认、弱试验映射未知
     om_ia = pairwise[(pairwise.stage_pair == "I-A") & (pairwise.variable == "OM_TMP")]
-    check.expect(bool((om_ia.handoff_conclusion
-                       == "not_concluded_source_unconfirmed").all()),
-                 "来源未确认时 I-A 结论应为 not_concluded_source_unconfirmed")
+    strong_ia = om_ia[om_ia.experiment == config.strong_experiment]
+    weak_ia = om_ia[om_ia.experiment == config.weak_experiment]
+    check.expect(bool((strong_ia.handoff_conclusion
+                       == "not_concluded_mapping_inferred_not_confirmed").all()),
+                 "来源已确认而映射推断未确认应 not_concluded_mapping_inferred_not_confirmed")
+    check.expect(bool((weak_ia.handoff_conclusion
+                       == "not_concluded_mapping_unknown").all()),
+                 "弱试验映射未知应 not_concluded_mapping_unknown")
     check.expect(bool((om_ia.status == "ok").all()),
                  "数值可计算(status=ok)与结论分离")
     # 弱试验映射未知:detail 记 mapping_unverified
@@ -2165,9 +2171,9 @@ def check_caliber_link_manual() -> Check:
 
 
 def check_verify04_end_to_end_real_mode_guard() -> Check:
-    """verify_04 真实模式防呆:B/A/I 真实路径默认未配置(文件名推断不自动
-    启用)、confirmed=False;F0 模板存在(独立断言)。"""
-    check = Check("verify_04 真实模式来源防呆")
+    """verify_04 真实模式配置:B/A/I/F0 路径均已按服务器核实结果配置并
+    confirmed=True(2026-10-05 只读核验);模板含 {domain}/{member} 占位符。"""
+    check = Check("verify_04 真实模式配置(已核实路径)")
     from verify_04_initial_handoff import _resolve_stage_path, _stage_source_configs
 
     real_config = VerifyConfig(
@@ -2177,17 +2183,23 @@ def check_verify04_end_to_end_real_mode_guard() -> Check:
         ),
     )
     sources = _stage_source_configs(real_config)
-    for stage in ("B", "A", "I"):
-        check.expect(sources[stage].path_template is None,
-                     f"{stage} 真实路径默认应未配置")
-        check.expect(sources[stage].confirmed is False,
-                     f"{stage} 的 confirmed 标记应为 False")
-    check.expect(sources["F0"].path_template is not None,
-                 "F0 模板应存在(服务器已核实的 wrfout 布局)")
-    check.expect(isinstance(sources["F0"].confirmed, bool),
-                 "F0 confirmed 应为布尔值")
-    check.expect(_resolve_stage_path(None, "d02", "006", "t") is None,
-                 "未配置模板应解析为 None(比较按 source_not_configured 跳过)")
+    for stage in ("B", "A", "I", "F0"):
+        check.expect(sources[stage].path_template is not None,
+                     f"{stage} 真实路径应已配置")
+        check.expect(sources[stage].confirmed is True,
+                     f"{stage} 的 confirmed 应为 True(已经只读核验)")
+        check.expect("{domain}" in sources[stage].path_template
+                     and "{member}" in sources[stage].path_template,
+                     f"{stage} 模板应含 {{domain}}/{{member}} 占位符")
+    # 抽查解析:B 指向 cyclingDA/10_00_00;I 指向 run_wrf/10_00_00
+    b_path = _resolve_stage_path(sources["B"].path_template, "d02", "006",
+                                 "2018-09-10_00:00:00", "exp", "EAKF")
+    check.expect("0mem_all_time/cyclingDA/10_00_00/firstguess_d02.mem006" in b_path,
+                 f"B 路径应指向 input_list 确认的先验: {b_path}")
+    i_path = _resolve_stage_path(sources["I"].path_template, "d02", "006",
+                                 "2018-09-10_00:00:00", "exp", "EAKF")
+    check.expect("5cyclingDA/run_wrf/10_00_00/006/wrfinput_d02" in i_path,
+                 f"I 路径应指向 run_wrf 启动场: {i_path}")
     return check
 
 
