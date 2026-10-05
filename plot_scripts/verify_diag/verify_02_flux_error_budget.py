@@ -38,9 +38,12 @@ SCRIPT_NAME = "verify02_flux_error_budget"
 # 可编辑配置区
 # =====================
 CONFIG = VerifyConfig(
-    mode="synthetic",  # "synthetic"(默认) | "real"(需同时改 real 配置并确认,见 README)
+    mode="real",  # "synthetic"(默认) | "real"(需同时改 real 配置并确认,见 README)
     output_dirname=SCRIPT_NAME,
     plot_regions=("r000_300", "r000_075", "r075_150", "r150_300"),
+    real=vc.RealPathConfig(
+        acknowledge_real_mode=True,   # 确认开关,缺省会拒绝运行
+    )
 )
 #: 保存逐点 dSE 场(.npz)的案例(方法, 成员, 预报时效)
 POINT_FIELD_CASES = (

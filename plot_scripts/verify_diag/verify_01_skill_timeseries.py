@@ -34,9 +34,12 @@ SCRIPT_NAME = "verify01_skill_timeseries"
 # 可编辑配置区
 # =====================
 CONFIG = VerifyConfig(
-    mode="synthetic",  # "synthetic"(默认) | "real"(需同时改 real 配置并确认,见 README)
+    mode="real",  # "synthetic"(默认) | "real"(需同时改 real 配置并确认,见 README)
     output_dirname=SCRIPT_NAME,
     plot_regions=("r000_300",),  # 时间序列图绘制的区域
+    real=vc.RealPathConfig(
+        acknowledge_real_mode=True,   # 确认开关,缺省会拒绝运行
+    )
 )
 #: 空间分类图与逐点场保存的案例(方法, 成员, 预报时效);可增删
 MAP_CASES = (

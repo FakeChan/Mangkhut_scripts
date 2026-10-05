@@ -1,19 +1,23 @@
 #!/bin/sh
 # =============================================================================
-# run_verify_diag.sh — 一次性提交 verify_diag 三个诊断的 LSF 作业脚本
+# run_verify_diag.sh — 一次性提交 verify_diag 诊断的 LSF 作业脚本
 #
 # 提交方式(在服务器上):
 #     cd /share/home/lililei1/kcfu/tc_mangkhut/plot_scripts/verify_diag
 #     bsub < run_verify_diag.sh
 #
-# 选择要运行的诊断:修改下方 RUN_VERIFY01/02/03(true=运行,false=跳过)。
-# 三个诊断按 01 -> 02 -> 03 顺序在同一作业内串行执行;每个诊断独立记录
+# 选择要运行的诊断:修改下方 RUN_VERIFY01/02/03/04(true=运行,false=跳过)。
+# 各诊断按 01 -> 02 -> 03 -> 04 顺序在同一作业内串行执行;每个诊断独立记录
 # 成功/失败,某个诊断失败不会中断其余诊断,作业结尾输出汇总并以非零
 # 状态退出(若有失败)。
 #
-# 注意:各入口脚本实际使用合成模式还是真实模式,由脚本自身的 CONFIG
-# 决定(mode="synthetic"/"real");本作业脚本不改写配置,只在日志中
-# 打印每个脚本当前的 mode,提交前请据此确认。
+# 注意:
+# 1. 各入口脚本实际使用合成模式还是真实模式,由脚本自身的 CONFIG
+#    决定(mode="synthetic"/"real");本作业脚本不改写配置,只在日志中
+#    打印每个脚本当前的 mode,提交前请据此确认。
+# 2. verify_04(初值传递核验)的真实模式需要先在其配置区确认
+#    STAGE_SOURCE_DEFAULTS 的 B/A/I 阶段路径(默认未配置,会按
+#    source_not_configured 跳过相应比较);合成模式可直接运行。
 # =============================================================================
 
 #BSUB -J verify_diag
@@ -32,6 +36,7 @@
 RUN_VERIFY01=true
 RUN_VERIFY02=true
 RUN_VERIFY03=true
+RUN_VERIFY04=true
 
 # --- 运行环境 ---
 PYTHON=/share/home/lililei1/kcfu/anaconda/envs/wrf/bin/python
@@ -95,6 +100,12 @@ if [ "${RUN_VERIFY03}" = "true" ]; then
     run_one verify_03_fixed_atmosphere_flux.py
 else
     echo "[verify_diag] skip  : verify_03_fixed_atmosphere_flux.py (RUN_VERIFY03=false)"
+fi
+
+if [ "${RUN_VERIFY04}" = "true" ]; then
+    run_one verify_04_initial_handoff.py
+else
+    echo "[verify_diag] skip  : verify_04_initial_handoff.py (RUN_VERIFY04=false)"
 fi
 
 echo ""

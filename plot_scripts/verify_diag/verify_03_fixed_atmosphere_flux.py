@@ -54,9 +54,12 @@ _FALLBACK_PLOT_SCRIPTS_DIR = VERIFY_DIAG_DIR.parents[1] / "Mangkhut_scripts" / "
 # 可编辑配置区
 # =====================
 CONFIG = VerifyConfig(
-    mode="synthetic",  # "synthetic"(默认) | "real"(需同时改 real 配置并确认,见 README)
+    mode="real",  # "synthetic"(默认) | "real"(需同时改 real 配置并确认,见 README)
     output_dirname=SCRIPT_NAME,
     plot_regions=("r000_300",),
+    real=vc.RealPathConfig(
+        acknowledge_real_mode=True,   # 确认开关,缺省会拒绝运行
+    )
 )
 #: 重建所用表面温度来源:
 #:   "TSK"           试验自身 TSK(通量方案实际使用的表面温度;默认,推荐)
