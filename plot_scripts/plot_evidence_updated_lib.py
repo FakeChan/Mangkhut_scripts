@@ -78,7 +78,7 @@ def member_time_then_cross_mean(
     value_cols = tuple(value_cols)
     key = list(group_cols) + [member_col]
     g = df.groupby(key, dropna=False)
-    per_member = g[value_cols].mean().reset_index()
+    per_member = g[list(value_cols)].mean().reset_index()
     times = g.size().reset_index(name="n_times_used")
     per_member = per_member.merge(times, on=key)
     agg = per_member.groupby(list(group_cols), dropna=False).agg(
@@ -170,7 +170,7 @@ def budget_summary_by_window(
     value_cols = ("delta_mse_direct", "cross_term", "increment_square_term")
     key = ["window", "method", "variable", "subset", "member"]
     g = win_assign(df, windows).groupby(key, dropna=False)
-    per_member = g[value_cols].mean().reset_index()
+    per_member = g[list(value_cols)].mean().reset_index()
     times = g.size().reset_index(name="n_times_used")
     per_member = per_member.merge(times, on=key)
     agg = per_member.groupby(

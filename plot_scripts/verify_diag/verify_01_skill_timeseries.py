@@ -76,18 +76,19 @@ def _expected_times(config: VerifyConfig) -> dict:
     }
 
 
-def run(config: VerifyConfig = CONFIG) -> Path:
-    """执行诊断一并写出全部结果;返回输出目录。合成模式仅使用内存合成数据。"""
-    vc.check_mode(config)
-    if config.mode == "synthetic":
-        from verify_synthetic import build_synthetic_provider
+def compute(config: VerifyConfig = CONFIG, provider=None, out_dir: Path | None = None) -> dict:
+    """诊断一计算部分(内存复用入口):不做汇总与落盘,返回逐案例原始表。
 
-        provider = build_synthetic_provider(config)
-    else:
-        provider = vc.RealWrfProvider(config)
+    返回键 status / metrics / classifications,与 run() 落盘的
+    verify01_run_status / verify01_member_metrics /
+    verify01_member_classification_fractions 三张主表逐列一致。
+    out_dir 给定时另存 MAP_CASES 的逐点场与分类图;为 None 时无任何文件写入。
+    """
+    vc.check_mode(config)
+    if provider is None:
+        provider = vc.make_provider(config)
 
     mode_tag = config.mode.upper()
-    out_dir = vc.ensure_output_dir(config, SCRIPT_NAME)
     metric_rows: list[dict] = []
     class_rows: list[dict] = []
     status_rows: list[dict] = []
@@ -183,43 +184,58 @@ def run(config: VerifyConfig = CONFIG) -> Path:
                                 "dse_flux": np.where(mask, dse_flux, np.nan),
                                 "category": np.where(mask, category, -99),
                             })
-        # ---- 本时次配置案例的逐点场与分类图 ----
-        for case in pending_fields:
-            tag = (
-                f"{case['method']}_{case['member']}_t{case['time_hour']:g}_"
-                f"{case['pair'].replace('-', '_')}"
-            )
-            vc.save_point_fields(
-                out_dir / "fields" / f"verify01_dSE_{tag}.npz",
-                dse_sst=case["dse_sst"],
-                dse_flux=case["dse_flux"],
-                category=case["category"],
-                distance_km=context["distance"],
-                lat=context["static"]["lat"],
-                lon=context["static"]["lon"],
-                nr_center_lat=context["center"][0],
-                nr_center_lon=context["center"][1],
-                mode=np.asarray(mode_tag),
-                method=np.asarray(case["method"]),
-                member=np.asarray(case["member"]),
-                time_hour=np.asarray(case["time_hour"]),
-            )
-            vc.plot_category_map(
-                case["category"],
-                context["distance"],
-                f"[{mode_tag}] SST-flux error-change category, {tag}\n"
-                f"(tol: {config.sst_se_tol:g} K^2, {config.flux_se_tol:g} (W m-2)^2)",
-                out_dir / "figs" / f"verify01_category_map_{tag}.png",
-            )
+        # ---- 本时次配置案例的逐点场与分类图(仅落盘模式;内存复用跳过)----
+        if out_dir is not None:
+            for case in pending_fields:
+                tag = (
+                    f"{case['method']}_{case['member']}_t{case['time_hour']:g}_"
+                    f"{case['pair'].replace('-', '_')}"
+                )
+                vc.save_point_fields(
+                    out_dir / "fields" / f"verify01_dSE_{tag}.npz",
+                    dse_sst=case["dse_sst"],
+                    dse_flux=case["dse_flux"],
+                    category=case["category"],
+                    distance_km=context["distance"],
+                    lat=context["static"]["lat"],
+                    lon=context["static"]["lon"],
+                    nr_center_lat=context["center"][0],
+                    nr_center_lon=context["center"][1],
+                    mode=np.asarray(mode_tag),
+                    method=np.asarray(case["method"]),
+                    member=np.asarray(case["member"]),
+                    time_hour=np.asarray(case["time_hour"]),
+                )
+                vc.plot_category_map(
+                    case["category"],
+                    context["distance"],
+                    f"[{mode_tag}] SST-flux error-change category, {tag}\n"
+                    f"(tol: {config.sst_se_tol:g} K^2, {config.flux_se_tol:g} (W m-2)^2)",
+                    out_dir / "figs" / f"verify01_category_map_{tag}.png",
+                )
+
+    return {
+        "status": pd.DataFrame(status_rows, columns=STATUS_COLUMNS),
+        "metrics": pd.DataFrame(metric_rows, columns=METRIC_COLUMNS),
+        "classifications": pd.DataFrame(class_rows, columns=CLASSIFICATION_COLUMNS),
+    }
+
+
+def run(config: VerifyConfig = CONFIG) -> Path:
+    """执行诊断一并写出全部结果;返回输出目录。合成模式仅使用内存合成数据。"""
+    vc.check_mode(config)
+    provider = vc.make_provider(config)
+    mode_tag = config.mode.upper()
+    out_dir = vc.ensure_output_dir(config, SCRIPT_NAME)
+    frames = compute(config, provider=provider, out_dir=out_dir)
+    status = frames["status"]
+    metrics = frames["metrics"]
+    classifications = frames["classifications"]
 
     # =====================
     # 汇总与输出(run_status 最先落盘:即使后续汇总/绘图异常,缺失与错误也已持久化)
     # =====================
-    status = pd.DataFrame(status_rows, columns=STATUS_COLUMNS)
     vc.write_csv(status, out_dir / "verify01_run_status.csv")
-
-    metrics = pd.DataFrame(metric_rows, columns=METRIC_COLUMNS)
-    classifications = pd.DataFrame(class_rows, columns=CLASSIFICATION_COLUMNS)
 
     summary_region_window = vc.summarize_member_metrics(
         metrics, keys=("mode", "method", "region", "variable", "unit"),

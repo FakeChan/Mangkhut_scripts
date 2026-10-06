@@ -106,18 +106,19 @@ def interpret_budget(budget: dict, unchanged_tol: float = BUDGET_UNCHANGED_TOL) 
     return "corrective_tendency_but_net_unfavorable"
 
 
-def run(config: VerifyConfig = CONFIG) -> Path:
-    """执行诊断二并写出全部结果;返回输出目录。合成模式仅使用内存合成数据。"""
-    vc.check_mode(config)
-    if config.mode == "synthetic":
-        from verify_synthetic import build_synthetic_provider
+def compute(config: VerifyConfig = CONFIG, provider=None, out_dir: Path | None = None) -> dict:
+    """诊断二计算部分(内存复用入口):不做汇总与落盘,返回逐案例原始表。
 
-        provider = build_synthetic_provider(config)
-    else:
-        provider = vc.RealWrfProvider(config)
+    返回键 status / budgets / conditional,与 run() 落盘的
+    verify02_run_status / verify02_member_budget /
+    verify02_conditional_budget 三张主表逐列一致。
+    out_dir 给定时另存 POINT_FIELD_CASES 的逐点场;为 None 时无任何文件写入。
+    """
+    vc.check_mode(config)
+    if provider is None:
+        provider = vc.make_provider(config)
 
     mode_tag = config.mode.upper()
-    out_dir = vc.ensure_output_dir(config, SCRIPT_NAME)
     budget_rows: list[dict] = []
     conditional_rows: list[dict] = []
     status_rows: list[dict] = []
@@ -274,33 +275,51 @@ def run(config: VerifyConfig = CONFIG) -> Path:
                                     mask, strong[variable] - weak[variable], np.nan
                                 ),
                             })
-        for case in pending_fields:
-            tag = (
-                f"{case['method']}_{case['member']}_t{case['time_hour']:g}_{case['variable']}"
-            )
-            vc.save_point_fields(
-                out_dir / "fields" / f"verify02_dSE_points_{tag}.npz",
-                dse=case["dse"],
-                error_weak=case["e"],
-                increment=case["df"],
-                distance_km=context["distance"],
-                lat=context["static"]["lat"],
-                lon=context["static"]["lon"],
-                nr_center_lat=context["center"][0],
-                nr_center_lon=context["center"][1],
-                mode=np.asarray(mode_tag),
-                method=np.asarray(case["method"]),
-                member=np.asarray(case["member"]),
-                time_hour=np.asarray(case["time_hour"]),
-            )
+        # 逐点场仅落盘模式保存(内存复用跳过)
+        if out_dir is not None:
+            for case in pending_fields:
+                tag = (
+                    f"{case['method']}_{case['member']}_t{case['time_hour']:g}_{case['variable']}"
+                )
+                vc.save_point_fields(
+                    out_dir / "fields" / f"verify02_dSE_points_{tag}.npz",
+                    dse=case["dse"],
+                    error_weak=case["e"],
+                    increment=case["df"],
+                    distance_km=context["distance"],
+                    lat=context["static"]["lat"],
+                    lon=context["static"]["lon"],
+                    nr_center_lat=context["center"][0],
+                    nr_center_lon=context["center"][1],
+                    mode=np.asarray(mode_tag),
+                    method=np.asarray(case["method"]),
+                    member=np.asarray(case["member"]),
+                    time_hour=np.asarray(case["time_hour"]),
+                )
+
+    return {
+        "status": pd.DataFrame(status_rows, columns=STATUS_COLUMNS),
+        "budgets": pd.DataFrame(budget_rows, columns=BUDGET_COLUMNS),
+        "conditional": pd.DataFrame(conditional_rows, columns=CONDITIONAL_COLUMNS),
+    }
+
+
+def run(config: VerifyConfig = CONFIG) -> Path:
+    """执行诊断二并写出全部结果;返回输出目录。合成模式仅使用内存合成数据。"""
+    vc.check_mode(config)
+    provider = vc.make_provider(config)
+    mode_tag = config.mode.upper()
+    out_dir = vc.ensure_output_dir(config, SCRIPT_NAME)
+    frames = compute(config, provider=provider, out_dir=out_dir)
+    status = frames["status"]
+    budgets = frames["budgets"]
+    conditional = frames["conditional"]
 
     # =====================
     # 汇总与输出(run_status 最先落盘)
     # =====================
-    status = pd.DataFrame(status_rows, columns=STATUS_COLUMNS)
     vc.write_csv(status, out_dir / "verify02_run_status.csv")
 
-    budgets = pd.DataFrame(budget_rows, columns=BUDGET_COLUMNS)
     summary_region_window = vc.summarize_member_metrics(
         budgets, keys=("mode", "method", "region", "variable", "unit"),
         expected_times=_expected_times(config),
@@ -312,7 +331,6 @@ def run(config: VerifyConfig = CONFIG) -> Path:
         summary_region_window.region == config.union_region
     ].drop(columns=["region"]).reset_index(drop=True)
 
-    conditional = pd.DataFrame(conditional_rows, columns=CONDITIONAL_COLUMNS)
     vc.write_csv(conditional, out_dir / "verify02_conditional_budget.csv")
     vc.write_csv(budgets, out_dir / "verify02_member_budget.csv")
     vc.write_csv(summary_region_window, out_dir / "verify02_summary_by_region_window.csv")

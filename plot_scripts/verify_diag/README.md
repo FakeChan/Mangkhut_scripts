@@ -10,9 +10,9 @@
 | 文件 | 作用 |
 |---|---|
 | `verify_common.py` | 公共模块:配置 dataclass、纯数组诊断函数、NR 配准、成员汇总、CSV/绘图输出、真实模式数据提供者(未测试) |
-| `verify_01_skill_timeseries.py` | 诊断一:完整误差时间序列 + 海温-通量逐点空间分类 |
-| `verify_02_flux_error_budget.py` | 诊断二:通量误差变化的精确分解(交叉项/平方项/闭合残差) |
-| `verify_03_fixed_atmosphere_flux.py` | 诊断三:固定大气海温替换(阶段 A 重建一致性 + 阶段 B 条件替换) |
+| `verify_01_skill_timeseries.py` | 诊断一:完整误差时间序列 + 海温-通量逐点空间分类;`compute()` 为无落盘内存入口(供 `plot_scripts/omtmp_raw_evidence.py` 直连原始 wrfout) |
+| `verify_02_flux_error_budget.py` | 诊断二:通量误差变化的精确分解(交叉项/平方项/闭合残差);`compute()` 同上 |
+| `verify_03_fixed_atmosphere_flux.py` | 诊断三:固定大气海温替换(阶段 A 重建一致性 + 阶段 B 条件替换);`compute()` 同上 |
 | `verify_synthetic.py` | 合成数据生成器(SYNTHETIC ONLY,固定种子,内存数据,不触任何真实文件) |
 | `verify_04_initial_handoff.py` | 诊断四:初值传递核验(B→A→I,及独立 F0;d_assim/d_handoff/d_pair 三组差值严格分名);默认真实模式,B/A/I/F0 路径已于 2026-10-05 服务器只读核验并填入配置(绑定 10_00_00 循环) |
 | `verify04_readers.py` | 小型 NetCDF 读取适配:按维度名称与 Times 属性定时间、网格一致性校验、无插值 |

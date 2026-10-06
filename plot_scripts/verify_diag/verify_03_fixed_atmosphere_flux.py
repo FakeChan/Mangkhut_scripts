@@ -317,19 +317,23 @@ def _surface_temperature(raw: dict) -> np.ndarray:
     raise ValueError(f"unknown SURFACE_TEMP_SOURCE: {SURFACE_TEMP_SOURCE}")
 
 
-def run(config: VerifyConfig = CONFIG) -> Path:
-    """执行诊断三(阶段 A + 阶段 B);返回输出目录。合成模式仅用内存合成数据。"""
-    vc.check_mode(config)
-    if config.mode == "synthetic":
-        from verify_synthetic import build_synthetic_provider
+def compute(config: VerifyConfig = CONFIG, provider=None, reconstructor=None,
+            out_dir: Path | None = None) -> dict:
+    """诊断三计算部分(内存复用入口):不做汇总与落盘,返回逐案例原始表。
 
-        provider = build_synthetic_provider(config)
-    else:
-        provider = vc.RealWrfProvider(config)
-    reconstructor = import_reconstructor()
+    返回键 status / phase_a / phase_b / joint,与 run() 落盘的
+    verify03_run_status / verify03_phaseA_reconstruction /
+    verify03_phaseB_replacement / verify03_joint_response_actual
+    四张主表逐列一致。out_dir 给定时另存 POINT_FIELD_CASES 的逐点场;
+    为 None 时无任何文件写入。
+    """
+    vc.check_mode(config)
+    if provider is None:
+        provider = vc.make_provider(config)
+    if reconstructor is None:
+        reconstructor = import_reconstructor()
 
     mode_tag = config.mode.upper()
-    out_dir = vc.ensure_output_dir(config, SCRIPT_NAME)
     phase_a_rows: list[dict] = []
     phase_b_rows: list[dict] = []
     joint_rows: list[dict] = []
@@ -370,16 +374,35 @@ def run(config: VerifyConfig = CONFIG) -> Path:
                         "status": f"reconstruction_failed: {type(error).__name__}: {error}",
                     })
 
+    return {
+        "status": pd.DataFrame(status_rows, columns=STATUS_COLUMNS),
+        "phase_a": pd.DataFrame(phase_a_rows, columns=PHASE_A_COLUMNS),
+        "phase_b": pd.DataFrame(phase_b_rows, columns=PHASE_B_COLUMNS),
+        "joint": pd.DataFrame(joint_rows, columns=JOINT_COLUMNS),
+    }
+
+
+def run(config: VerifyConfig = CONFIG) -> Path:
+    """执行诊断三(阶段 A + 阶段 B);返回输出目录。合成模式仅用内存合成数据。"""
+    vc.check_mode(config)
+    provider = vc.make_provider(config)
+    reconstructor = import_reconstructor()
+    mode_tag = config.mode.upper()
+    out_dir = vc.ensure_output_dir(config, SCRIPT_NAME)
+    frames = compute(
+        config, provider=provider, reconstructor=reconstructor, out_dir=out_dir
+    )
+    status = frames["status"]
+    phase_a = frames["phase_a"]
+    phase_b = frames["phase_b"]
+    joint = frames["joint"]
+
     # =====================
     # 汇总与输出(run_status 最先落盘)
     # =====================
-    status = pd.DataFrame(status_rows, columns=STATUS_COLUMNS)
     vc.write_csv(status, out_dir / "verify03_run_status.csv")
-    phase_a = pd.DataFrame(phase_a_rows, columns=PHASE_A_COLUMNS)
-    phase_b = pd.DataFrame(phase_b_rows, columns=PHASE_B_COLUMNS)
     vc.write_csv(phase_a, out_dir / "verify03_phaseA_reconstruction.csv")
     vc.write_csv(phase_b, out_dir / "verify03_phaseB_replacement.csv")
-    joint = pd.DataFrame(joint_rows, columns=JOINT_COLUMNS)
     vc.write_csv(joint, out_dir / "verify03_joint_response_actual.csv")
     _plot(phase_a, phase_b, config, out_dir, mode_tag)
     # 联合表的窗口汇总(先成员内时间平均,后跨成员等权;逐子集)
@@ -921,6 +944,9 @@ def _process_case(
             # 实际 C/S/ΔMSE 列名前缀处理:统一为 actual_*
             if (method, member, time_hour) in POINT_FIELD_CASES and region_name == config.union_region:
                 pending_fields.append((variable, d_sst, d_rest, d_total, actual, flux_ww, flux_sw, flux_ss, flux_ws, mask_compare))
+    # 逐点场仅落盘模式保存(内存复用跳过)
+    if out_dir is None:
+        return
     for variable, d_sst, d_rest, d_total, actual, fww, fsw, fss, fws, mask_c in pending_fields:
         tag = f"{method}_{member}_t{time_hour:g}_{variable}"
         arrays = {

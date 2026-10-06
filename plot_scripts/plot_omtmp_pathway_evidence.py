@@ -1,4 +1,12 @@
-"""Create a six-panel evidence figure for the OM_TMP-atmosphere pathway."""
+"""OM_TMP-大气路径证据图:图 1/2/3(+可选图 4)与可选的旧六联图。
+
+默认数据流(EVIDENCE_SOURCE="wrf"):直接从原始 wrfout 计算——
+verify_diag 三诊断的 compute() 内存入口 + analyze_d03 移植汇总
+(omtmp_raw_evidence.py),全程不读取任何诊断 CSV;真实模式首次计算
+约 2 小时,之后命中 pickle 缓存(omtmp_raw_evidence_cache/)。
+EVIDENCE_SOURCE="csv" 改读 2026-10-06 诊断复核快照(本地存档复现)。
+旧六联图默认关闭(RUN_LEGACY_SIX_PANEL,依赖 2026-08-03 旧缓存)。
+"""
 
 from __future__ import annotations
 
@@ -112,14 +120,14 @@ def panel_bbox_inches(fig, artists, pad=0.04):
     return bbox.padded(pad)
 
 
-def save_individual_panels(fig, panel_artists):
-    PANEL_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+def save_individual_panels(fig, panel_artists, output_dir=PANEL_OUTPUT_DIR):
+    output_dir.mkdir(parents=True, exist_ok=True)
     for panel_name, artists in panel_artists.items():
         bbox = panel_bbox_inches(fig, artists)
         kwargs = {"bbox_inches": bbox, "facecolor": "white"}
         if EXPORT_FORMAT == "png":
             kwargs["dpi"] = PNG_DPI
-        fig.savefig(PANEL_OUTPUT_DIR / f"{panel_name}.{EXPORT_FORMAT}", **kwargs)
+        fig.savefig(output_dir / f"{panel_name}.{EXPORT_FORMAT}", **kwargs)
 
 
 
@@ -137,6 +145,19 @@ MEMBER_METRICS_CSV = LATEST_OUTPUTS / "REAL_verify01_skill_timeseries" / "verify
 CONDITIONAL_BUDGET_CSV = LATEST_OUTPUTS / "REAL_verify02_flux_error_budget" / "verify02_conditional_budget.csv"
 FOCUS_QUALITY_CSV = ANALYSIS_D03 / "11_report_focus_quality.csv"
 FOCUS_METRICS_CSV = ANALYSIS_D03 / "12_report_focus_metrics.csv"
+
+# 数据源开关:
+#   EVIDENCE_SOURCE="wrf"(默认):直接从原始 wrfout 计算——verify_diag 三诊断
+#     的 compute() 内存入口 + analyze_d03 移植汇总(omtmp_raw_evidence.py),
+#     全程不读取任何诊断 CSV;真实模式首次计算约 2 小时,结果 pickle 缓存。
+#   EVIDENCE_SOURCE="csv":读取 2026-10-06 诊断复核的本地快照 CSV
+#     (仅在无 wrfout 数据的环境下复现旧图时使用)。
+# 环境变量 OMTMP_EVIDENCE_SOURCE / OMTMP_RAW_MODE / OMTMP_RAW_CACHE_POLICY
+# 可临时覆盖,便于冒烟测试(synthetic)与强制刷新。
+EVIDENCE_SOURCE = os.environ.get("OMTMP_EVIDENCE_SOURCE", "wrf")  # "wrf" | "csv"
+RAW_EVIDENCE_MODE = os.environ.get("OMTMP_RAW_MODE", "real")  # "real" | "synthetic"
+RAW_EVIDENCE_CACHE_DIR = SCRIPT_DIR / "omtmp_raw_evidence_cache"
+RAW_EVIDENCE_CACHE_POLICY = os.environ.get("OMTMP_RAW_CACHE_POLICY", "auto")  # auto/refresh/reuse
 
 UPDATED_FIG_DIR = SCRIPT_DIR / "figs" / "verify_diag_updated_evidence"
 UPDATED_PANEL_DIR = SCRIPT_DIR / "figs" / "verify_diag_updated_evidence_panels"
@@ -566,9 +587,11 @@ def build_legacy_six_panel():
 
 
 # =============================================================================
-# 新增图(图 1/2/3 与可选图 4):基于 2026-10-06 最新诊断 CSV
-# (diagnostic_reports/20261006_verify_diag_rerun_review),独立于旧缓存,
-# 不调用 ensure_pathway_cache 或任何提取入口。
+# 新增图(图 1/2/3 与可选图 4):默认(EVIDENCE_SOURCE="wrf")直接从原始
+# wrfout 计算全部输入——verify_diag 三诊断 compute() 内存入口 +
+# analyze_d03 移植(见 omtmp_raw_evidence.py),不依赖任何诊断 CSV;
+# EVIDENCE_SOURCE="csv" 时改为读取 2026-10-06 诊断复核快照(本地存档)。
+# 两条路径产出同一批输入帧;旧六联图缓存不受影响。
 # 空间口径:NR 中心、0-300 km 海洋逐点(与原六联图的配对中心、
 # 0-150 km 块平均不是同一口径,两者不可直接混合平均)。
 # =============================================================================
@@ -586,12 +609,43 @@ def _export_source_csv(frame, name):
 
 
 def load_latest_diagnostics():
-    """读取 2026-10-06 重跑的最新诊断 CSV(不触发任何缓存/提取)。"""
-    member_metrics = pd.read_csv(MEMBER_METRICS_CSV, dtype={"member": str})
-    conditional = pd.read_csv(CONDITIONAL_BUDGET_CSV, dtype={"member": str})
-    focus_quality = pd.read_csv(FOCUS_QUALITY_CSV)
-    focus_metrics = pd.read_csv(FOCUS_METRICS_CSV)
-    return member_metrics, conditional, focus_quality, focus_metrics
+    """加载图 1/2/3(+可选图 4)的输入帧,返回 dict。
+
+    EVIDENCE_SOURCE="wrf"(默认):从原始 wrfout 直接计算——verify_diag 三诊断
+    的 compute() 内存入口 + analyze_d03 移植(omtmp_raw_evidence.py),
+    不读取任何诊断 CSV;真实模式首次计算约 2 小时,之后命中 pickle 缓存。
+    EVIDENCE_SOURCE="csv":读取 2026-10-06 诊断复核的本地快照 CSV(存档复现)。
+    返回键:member_metrics / conditional / focus_quality / focus_metrics /
+    classifications(图 4 用)。
+    """
+    if EVIDENCE_SOURCE == "wrf":
+        import omtmp_raw_evidence as raw_evidence
+
+        frames = raw_evidence.ensure_raw_evidence(
+            cache_dir=RAW_EVIDENCE_CACHE_DIR,
+            cache_policy=RAW_EVIDENCE_CACHE_POLICY,
+            mode=RAW_EVIDENCE_MODE,
+        )
+        return {
+            "member_metrics": frames["member_metrics"],
+            "conditional": frames["conditional"],
+            "focus_quality": frames["focus_quality"],
+            "focus_metrics": frames["focus_metrics"],
+            "classifications": frames["classifications"],
+        }
+    if EVIDENCE_SOURCE != "csv":
+        raise ValueError(f"unsupported EVIDENCE_SOURCE: {EVIDENCE_SOURCE!r}")
+    return {
+        "member_metrics": pd.read_csv(MEMBER_METRICS_CSV, dtype={"member": str}),
+        "conditional": pd.read_csv(CONDITIONAL_BUDGET_CSV, dtype={"member": str}),
+        "focus_quality": pd.read_csv(FOCUS_QUALITY_CSV),
+        "focus_metrics": pd.read_csv(FOCUS_METRICS_CSV),
+        "classifications": pd.read_csv(
+            LATEST_OUTPUTS / "REAL_verify01_skill_timeseries"
+            / "verify01_member_classification_fractions.csv",
+            dtype={"member": str},
+        ),
+    }
 
 
 def fig1_rmse_improvement(member_metrics):
@@ -654,9 +708,9 @@ def _budget_groups(budget, flux, window):
                          & (budget.variable == flux)
                          & (budget.subset == subset)]
             if len(row):
-                c = float(row.cross_term.iloc[0])
-                s = float(row.increment_square_term.iloc[0])
-                dm = float(row.delta_mse_direct.iloc[0])
+                c = float(row.mean_member_cross_term.iloc[0])
+                s = float(row.mean_member_increment_square_term.iloc[0])
+                dm = float(row.mean_member_delta_mse_direct.iloc[0])
                 n_members = int(row.n_members.iloc[0])
                 period = "early" if window.startswith("early") else "late"
                 label = f"{METHOD_LABELS[method]}\n{tag}\n{period}"
@@ -688,7 +742,6 @@ def fig2_budget_windows(conditional):
     windows_order = ("early_0p5_2h", "late_3_6h")
     for ax_row, flux in zip(axes, ("hfx", "lh")):
         for ax_col, window in zip(ax_row, windows_order):
-            ax.clear()
             groups = _budget_groups(budget, flux, window)
             x = np.arange(len(groups))
             width = 0.25
@@ -698,17 +751,17 @@ def fig2_budget_windows(conditional):
                     ("dm", "ΔMSE = C+S", "//"))):
                 vals = [g[metric] for g in groups]
                 colors = [METHOD_COLORS[g["method"]] for g in groups]
-                ax.bar(x + (offset - 1) * width, vals, width, label=label,
-                       color=colors, alpha=0.75 if metric != "dm" else 1.0,
-                       hatch=hatch if metric == "dm" else "",
-                       edgecolor="white")
-            ax.axhline(0.0, color="#4D4D4D", lw=0.8)
-            ax.set_xticks(x, [g["label"] for g in groups], fontsize=6,
-                          rotation=30, ha="right")
-            ax.set_title(f"{flux.upper()}  (W m$^{{-2}})^2$", loc="left",
-                         fontsize=9)
-            ax.grid(alpha=0.25, axis="y")
-            ax.annotate(
+                ax_col.bar(x + (offset - 1) * width, vals, width, label=label,
+                           color=colors, alpha=0.75 if metric != "dm" else 1.0,
+                           hatch=hatch if metric == "dm" else "",
+                           edgecolor="white")
+            ax_col.axhline(0.0, color="#4D4D4D", lw=0.8)
+            ax_col.set_xticks(x, [g["label"] for g in groups], fontsize=6,
+                              rotation=30, ha="right")
+            ax_col.set_title(f"{flux.upper()}  (W m$^{{-2}})^2$", loc="left",
+                             fontsize=9)
+            ax_col.grid(alpha=0.25, axis="y")
+            ax_col.annotate(
                 "n_members: "
                 + ", ".join(f"{g['method']}-{g['subset'].replace('_', '-')}="
                             f"{g['n_members']}" for g in groups),
@@ -868,19 +921,24 @@ def fig4_classification(classification_fractions):
 
 
 def build_updated_evidence():
-    """生成三张新图(+可选图 4)与源数据汇总表(不触旧缓存/服务器)。"""
+    """生成三张新图(+可选图 4)与源数据汇总表。
+
+    默认(EVIDENCE_SOURCE="wrf")直接从原始 wrfout 计算全部输入
+    (verify_diag compute() 串联 + analyze_d03 内存汇总,不读任何 CSV);
+    EVIDENCE_SOURCE="csv" 时读取 2026-10-06 诊断复核快照复现旧图。
+    旧六联图缓存不受影响(需另行开关 RUN_LEGACY_SIX_PANEL)。
+    """
     UPDATED_FIG_DIR.mkdir(parents=True, exist_ok=True)
     UPDATED_PANEL_DIR.mkdir(parents=True, exist_ok=True)
     UPDATED_SOURCE_DIR.mkdir(parents=True, exist_ok=True)
 
-    member_metrics, conditional, focus_quality, focus_metrics = \
-        load_latest_diagnostics()
+    evidence = load_latest_diagnostics()
 
     fmt = UPDATED_EXPORT_FORMAT
     dpi = UPDATED_PNG_DPI
 
     # ---- 图 1 ----
-    fig1, summary1 = fig1_rmse_improvement(member_metrics)
+    fig1, summary1 = fig1_rmse_improvement(evidence["member_metrics"])
     summary1["region"] = EVIDENCE_REGION
     summary1["aggregation"] = "member-time mean, then equal-weight members"
     summary1["error_reference"] = "NR"
@@ -893,11 +951,11 @@ def build_updated_evidence():
         "u1b_tsk_improvement": [fig1.axes[1]],
         "u1c_hfx_improvement": [fig1.axes[2]],
         "u1d_lh_improvement": [fig1.axes[3]],
-    })
+    }, output_dir=UPDATED_PANEL_DIR)
     plt.close(fig1)
 
     # ---- 图 2 ----
-    fig2, budget = fig2_budget_windows(conditional)
+    fig2, budget = fig2_budget_windows(evidence["conditional"])
     budget["region"] = EVIDENCE_REGION
     budget["aggregation"] = "member-time mean, then equal-weight members"
     budget["note"] = "delta_mse = cross_term + increment_square_term"
@@ -910,13 +968,18 @@ def build_updated_evidence():
         "u2_lh_early": [fig2.axes[1]],
         "u2_hfx_late": [fig2.axes[2]],
         "u2_lh_late": [fig2.axes[3]],
-    })
+    }, output_dir=UPDATED_PANEL_DIR)
     plt.close(fig2)
 
     # ---- 图 3 ----
-    fig3, joint_and_cov = fig3_sst_response_lh(focus_quality, focus_metrics)
-    joint_and_cov["region"] = EVIDENCE_REGION
-    _export_source_csv(joint_and_cov, "fig3_sst_response_source.csv")
+    fig3, fig3_tables = fig3_sst_response_lh(
+        evidence["focus_quality"], evidence["focus_metrics"]
+    )
+    for table_name, table in fig3_tables.items():
+        if isinstance(table, pd.DataFrame):
+            table = table.copy()
+            table["region"] = EVIDENCE_REGION
+            _export_source_csv(table, f"fig3_sst_response_{table_name}.csv")
     fig3.savefig(UPDATED_FIG_DIR / f"fig3_sst_response_lh.{fmt}",
                  dpi=dpi if fmt == "png" else None,
                  bbox_inches="tight", facecolor="white")
@@ -924,16 +987,12 @@ def build_updated_evidence():
         "u3a_quality_cases": [fig3.axes[0]],
         "u3b_rms_ratio": [fig3.axes[1]],
         "u3c_csst": [fig3.axes[2]],
-    })
+    }, output_dir=UPDATED_PANEL_DIR)
     plt.close(fig3)
 
     # ---- 可选图 4(默认关闭)----
     if RUN_OPTIONAL_FIG4:
-        classification = pd.read_csv(
-            LATEST_OUTPUTS / "REAL_verify01_skill_timeseries" /
-            "verify01_member_classification_fractions.csv",
-            dtype={"member": str},
-        )
+        classification = evidence["classifications"]
         fig4, class_summary = fig4_classification(classification)
         class_summary["region"] = EVIDENCE_REGION
         class_summary["denominator"] = "points with both TSK and flux changes"

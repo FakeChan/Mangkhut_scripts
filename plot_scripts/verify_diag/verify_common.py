@@ -175,6 +175,16 @@ def check_mode(config: VerifyConfig) -> None:
     )
 
 
+def make_provider(config: VerifyConfig):
+    """按配置模式构造数据提供者(合成/真实);run() 与内存复用入口共用。"""
+    check_mode(config)
+    if config.mode == "synthetic":
+        from verify_synthetic import build_synthetic_provider
+
+        return build_synthetic_provider(config)
+    return RealWrfProvider(config)
+
+
 # ------------------------------------------------------------------
 # 掩膜与区域
 # ------------------------------------------------------------------
