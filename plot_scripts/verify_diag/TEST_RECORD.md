@@ -636,3 +636,34 @@ cycle_test wrfout 布局;阶段差仅保留 A-B(总初值变化,含同化/TSK �
 传递的合计;纯 DART 增量在 inc 文件中,为 6 月 22 日旧代际,列为局限)。
 单位门控在真实数据上生效:OM_TMP 的小写 "k" units 已按用户同意登记为
 拼写别名(数值恒等,放行不改数值)。冒烟测试 51/51 通过。
+
+
+## 附:汇报图生成代码(2026-10-06,仅代码与本地测试,未执行绘图)
+
+按任务书扩展 `plot_omtmp_pathway_evidence.py` 并新增
+`plot_evidence_updated_lib.py`:
+
+- 原六联图模块级执行整体包入 `build_legacy_six_panel()`(405 行函数体完整
+  保留,含 ensure_pathway_cache 与 savefig),由 `RUN_LEGACY_SIX_PANEL=False`
+  控制默认关闭;导入模块不再触发缓存检查/绘图/图片导出(此前模块级即执行,
+  已修复并回归验证);
+- 新增三图:`fig1_rmse_improvement`(诊断一,四面板改善率时序,细线成员+
+  粗线方法平均,早晚窗口底色,海温/通量分开纵轴)、`fig2_budget_windows`
+  (诊断二,ΔMSE=C+S 分组柱图,早晚 × 方法 × 全域/TSK 改善子集)、
+  `fig3_sst_response_lh`(诊断三 LH,质量覆盖/RMS 比/C_SST 三面板);
+  可选图 4(TSK×通量四类比例,归一化到双方均有变化格点)默认关闭
+  (`RUN_OPTIONAL_FIG4=False`);
+- 新图读 `diagnostic_reports/20261006_verify_diag_rerun_review` 的最新
+  诊断 CSV 与 analyze_d03 的 11/12 汇总表,复用其质量筛选定义
+  (保守交集=联合筛选∩Phase A 双合格),不触旧缓存;
+- 输出路径:`figs/verify_diag_updated_evidence/`(整图)、
+  `..._panels/`(独立面板)、`..._source_data/`(源数据汇总 CSV,
+  含区域/窗口/聚合方式/质量筛选列)——本次未生成,待用户执行;
+- 单位别名登记:("OM_TMP","k","K") 大小写拼写别名(真实文件全部写
+  小写 "k"),数值恒等,仅放行不换算——解锁真实文件的 OM_TMP 比较。
+
+本地测试:汇总顺序(成员内时间平均→跨成员等权)、图 1 早期汇总值与
+报告核对值一致(EAKF OM +14.34/TSK +13.46/HFX −0.560/LH −0.650 等)、
+ΔMSE=C+S 闭合、后期全域 EAKF HFX −1.783 与 TSK 改善子集 +6.678 正确区分、
+保守交集覆盖(早期 LH 10/8 案例、4 成员;HFX 0/1)与后期(42/42)
+核对一致、空子集/0 h 不填零、导入无绘图/缓存/网络副作用。51/51 通过。
