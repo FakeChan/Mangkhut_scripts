@@ -122,8 +122,11 @@ def panel_bbox_inches(fig, artists, pad=0.04):
 
 
 def save_individual_panels(fig, panel_artists, output_dir=PANEL_OUTPUT_DIR):
+    """按面板导出独立文件;panel_artists 值可为 artist 列表或单个 artist。"""
     output_dir.mkdir(parents=True, exist_ok=True)
     for panel_name, artists in panel_artists.items():
+        if hasattr(artists, "get_tightbbox"):  # 单个 Axes 直接传入,归一化为列表
+            artists = [artists]
         bbox = panel_bbox_inches(fig, artists)
         kwargs = {"bbox_inches": bbox, "facecolor": "white"}
         if EXPORT_FORMAT == "png":
