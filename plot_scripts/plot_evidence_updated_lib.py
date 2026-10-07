@@ -199,6 +199,123 @@ def win_assign(df: pd.DataFrame, windows=WINDOWS, time_col: str = "time_hour"):
 # =====================
 # 图 3:离线 SST 响应与质量覆盖(诊断三)
 # =====================
+#: 图三的显式「方法 × 窗口」分组顺序:覆盖表、联合指标表、保守指标表
+#: 全部按此键重排后再生成横轴标签,禁止各表分别排序后直接转数组。
+FIG3_GROUP_KEYS = (
+    ("EAKF", "early_0p5_2h"),
+    ("QCF_RHF", "early_0p5_2h"),
+    ("EAKF", "late_3_6h"),
+    ("QCF_RHF", "late_3_6h"),
+)
+FIG3_METHOD_LABELS = {"EAKF": "EAKF", "QCF_RHF": "QCF-RHF"}
+FIG3_WINDOW_LABELS = {"early_0p5_2h": "early", "late_3_6h": "late"}
+
+
+def align_to_group_keys(frame: pd.DataFrame, keys, key_cols) -> tuple:
+    """按显式分组键重排 frame;缺失组合保留为全 NaN 行并单独报告,重复键报错。
+
+    返回 (aligned, missing):aligned 与 keys 行序一致(key 列在前,已
+    reset_index);missing 是 frame 中不存在的键列表。缺失组合不填零,
+    由调用方以「缺失」而非 0 呈现。
+    """
+    cols = list(key_cols)
+    duplicated = frame.duplicated(cols, keep=False)
+    if duplicated.any():
+        seen = frame.loc[duplicated, cols].drop_duplicates()
+        raise ValueError(f"duplicate group keys: {seen.to_dict('records')}")
+    present = set(map(tuple, frame[cols].itertuples(index=False, name=None)))
+    missing = [tuple(key) for key in keys if tuple(key) not in present]
+    index = pd.MultiIndex.from_tuples([tuple(key) for key in keys], names=cols)
+    aligned = frame.set_index(cols).reindex(index)
+    return aligned.reset_index(), missing
+
+
+def fig3_panel_data(coverage: pd.DataFrame, metrics_joint: pd.DataFrame,
+                    metrics_conservative: pd.DataFrame,
+                    keys=FIG3_GROUP_KEYS) -> dict:
+    """图三三面板的数值准备(纯函数,不绘图):三表按同一显式键重排。
+
+    coverage 为 lib.focus_coverage 输出(含 n_rows/n_pass/
+    n_joint_and_regionA_pass);metrics_* 为 12 表按 gate 过滤后的行。
+    返回等长 numpy 数组与标签;任何表中缺失的组合在数值上为 NaN 并列入
+    missing,不填零。
+    """
+    cov, cov_missing = align_to_group_keys(coverage, keys, ["method", "window"])
+    met_j, mj_missing = align_to_group_keys(
+        metrics_joint, keys, ["method", "window"])
+    met_c, mc_missing = align_to_group_keys(
+        metrics_conservative, keys, ["method", "window"])
+    missing = sorted(set(cov_missing) | set(mj_missing) | set(mc_missing))
+    labels = [
+        f"{FIG3_METHOD_LABELS[method]}\n{FIG3_WINDOW_LABELS[window]}"
+        for method, window in keys
+    ]
+    return {
+        "keys": tuple(keys),
+        "labels": labels,
+        "missing": missing,
+        "joint_pass": cov["n_pass"].to_numpy(dtype=float),
+        "joint_den": cov["n_rows"].to_numpy(dtype=float),
+        "cons_pass": cov["n_joint_and_regionA_pass"].to_numpy(dtype=float),
+        "cons_den": cov["n_rows"].to_numpy(dtype=float),
+        "cons_members": met_c["n_members"].to_numpy(dtype=float),
+        "ratio_joint": met_j["mean_member_sst_to_actual_rms_ratio"].to_numpy(dtype=float),
+        "ratio_conservative": met_c["mean_member_sst_to_actual_rms_ratio"].to_numpy(dtype=float),
+        "csst_joint": met_j["mean_member_cross_model_error_sst_response"].to_numpy(dtype=float),
+        "csst_conservative": met_c["mean_member_cross_model_error_sst_response"].to_numpy(dtype=float),
+    }
+
+
+# =====================
+# 图 1/2 展示辅助(纯函数)
+# =====================
+def auto_ylim(values, pad_frac: float = 0.08, include_zero: bool = True) -> tuple:
+    """覆盖全部有限值的纵轴范围(含零参考线),两端留 pad_frac 相对边距。
+
+    空输入返回占位 (-1.0, 1.0)。用于替代固定 ylim,避免截断成员曲线;
+    手动配置的轴不经过本函数。
+    """
+    vals = np.asarray(
+        [v for v in np.ravel(values) if np.isfinite(v)], dtype=float)
+    if vals.size == 0:
+        return (-1.0, 1.0)
+    lo, hi = float(vals.min()), float(vals.max())
+    if include_zero:
+        lo, hi = min(lo, 0.0), max(hi, 0.0)
+    span = hi - lo
+    if span <= 0.0:
+        span = max(abs(hi), 1.0e-6)
+    return (lo - pad_frac * span, hi + pad_frac * span)
+
+
+def fig2_panel_map(axes):
+    """2x2 轴数组 -> 图二独立面板导出名(左上/右上/左下/右下按真实内容)。
+
+    布局约定:axes[0][0]=HFX early,axes[0][1]=HFX late,
+    axes[1][0]=LH early,axes[1][1]=LH late。导出名与内容一一对应,
+    不再依赖 fig.axes 数字索引。
+    """
+    return {
+        "u2_hfx_early": axes[0][0],
+        "u2_hfx_late": axes[0][1],
+        "u2_lh_early": axes[1][0],
+        "u2_lh_late": axes[1][1],
+    }
+
+
+def fig2_uniform_members(budget: pd.DataFrame, expected: int = 6) -> bool:
+    """图二全部「窗口×方法×变量×子集」组是否都为 expected 个成员。
+
+    全部为 6 时可在整图图注统一说明成员数;否则需在组标签中逐组标注。
+    """
+    sub = budget[budget.variable.isin(("hfx", "lh"))]
+    if sub.empty:
+        return False
+    counts = sub.groupby(["window", "method", "variable", "subset"])[
+        "n_members"].first()
+    return bool((counts == expected).all())
+
+
 def focus_coverage(focus_quality: pd.DataFrame,
                    windows=("early_0p5_2h", "late_3_6h"),
                    variables=("hfx", "lh"),

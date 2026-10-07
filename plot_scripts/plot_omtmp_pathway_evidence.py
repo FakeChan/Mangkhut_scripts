@@ -22,6 +22,7 @@ matplotlib.use("Agg")
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 from matplotlib.transforms import Bbox
 import numpy as np
 import pandas as pd
@@ -164,7 +165,27 @@ UPDATED_PANEL_DIR = SCRIPT_DIR / "figs" / "verify_diag_updated_evidence_panels"
 UPDATED_SOURCE_DIR = SCRIPT_DIR / "figs" / "verify_diag_updated_evidence_source_data"
 UPDATED_EXPORT_FORMAT = "png"  # "png" / "svg" / "pdf"
 UPDATED_PNG_DPI = 400
-UPDATED_FIG_SIZE_INCH = (7.2, 8.1)
+# ---- 三张新图的尺寸与样式配置(集中管理) ----
+FIG1_SIZE_INCH = (7.2, 7.2)     # 图 1:2x2 时序
+#: 图 1 手动纵轴 {变量: (lo, hi)};None = 自动覆盖全部有限成员值与方法均值
+FIG1_YLIM_MANUAL = {"om": None, "tsk": None, "hfx": None, "lh": None}
+FIG1_MEMBER_LW = 0.6            # 成员细线
+FIG1_MEMBER_ALPHA = 0.30        # 成员细线透明度(更轻,突出方法平均)
+FIG1_MEAN_LW = 2.0              # 方法平均粗线
+FIG2_SIZE_INCH = (7.6, 7.2)     # 图 2:2x2 预算(画布加宽避免标签拥挤)
+FIG2_BAR_WIDTH = 0.25           # 图 2 每组三柱(C/S/ΔMSE)宽度
+FIG3_SIZE_INCH = (7.6, 3.8)     # 图 3:1x3 覆盖/RMS 比/C_SST
+FIG3_XLABEL_FONTSIZE = 7
+#: 六个配对成员(展示标注的成员数分母;与 VerifyConfig.members 一致)
+N_PAIR_MEMBERS = 6
+#: 窗口标题(图 2 面板标题)与简称(图 3 标签)
+WINDOW_TITLES = {"early_0p5_2h": "early (0.5-2 h)", "late_3_6h": "late (3-6 h)"}
+WINDOW_SHORT = {"early_0p5_2h": "early", "late_3_6h": "late"}
+#: 图 2 条件子集短标签
+FIG2_SUBSET_LABELS = {"all_common": "all", "sst_improved": "TSK-imp"}
+#: 图 2/3 筛选级别配色(三面板一致)
+SCREEN_COLORS = {"joint": "#9EC9E2", "conservative": "#2C7FB8"}
+MISSING_COLOR = "#BFBFBF"
 
 # 新图空间口径与窗口(NR 中心、0-300 km 海洋逐点;与原六联图的
 # 配对中心、0-150 km 块平均不是同一口径,两者不可直接混合平均)
@@ -652,12 +673,14 @@ def fig1_rmse_improvement(member_metrics):
     """图 1:四变量相对 RMSE 改善时序(0-300 km,0-6 h 全部半小时)。
 
     误差参照 NR;细线=成员,粗线=方法平均(成员等权);正值=改善。
+    纵轴默认自动覆盖全部有限成员值与方法均值(FIG1_YLIM_MANUAL 可按变量
+    手动固定),不裁掉成员曲线。
     """
     ts = lib.skill_member_timeseries(member_metrics, region=EVIDENCE_REGION)
     summary = lib.skill_summary_by_window(
         member_metrics, region=EVIDENCE_REGION, windows=lib.WINDOWS
     )
-    fig, axes = plt.subplots(2, 2, figsize=UPDATED_FIG_SIZE_INCH, sharex=True,
+    fig, axes = plt.subplots(2, 2, figsize=FIG1_SIZE_INCH, sharex=True,
                              constrained_layout=True)
     axes = axes.ravel()
     for ax, var in zip(axes, VAR_ORDER):
@@ -670,39 +693,49 @@ def fig1_rmse_improvement(member_metrics):
             )
             for member, g in member_ts.groupby("member"):
                 ax.plot(g.time_hour, g.rmse_improvement_pct, color=color,
-                        lw=0.7, alpha=0.45, label="_nolegend_")
+                        lw=FIG1_MEMBER_LW, alpha=FIG1_MEMBER_ALPHA,
+                        label="_nolegend_")
             ax.plot(method_mean.time_hour, method_mean.rmse_improvement_pct,
-                    color=color, lw=1.8, marker="o", ms=3,
+                    color=color, lw=FIG1_MEAN_LW, marker="o", ms=3,
                     label=METHOD_LABELS[method])
         ax.axhline(0.0, color="#4D4D4D", lw=0.7)
-        ax.axvspan(0.5, 2.0, color="#DDF3DE", alpha=0.5, zorder=0)
-        ax.axvspan(3.0, 6.0, color="#FDE8E8", alpha=0.45, zorder=0)
+        ax.axvspan(0.5, 2.0, color="#DDF3DE", alpha=0.35, zorder=0)
+        ax.axvspan(3.0, 6.0, color="#FDE8E8", alpha=0.30, zorder=0)
         ax.set_title(VARIABLE_LABELS[var], loc="left", fontsize=9)
-        if var in ("om", "tsk"):
-            ax.set_ylim(-5, 45)
+        manual_ylim = FIG1_YLIM_MANUAL.get(var)
+        if manual_ylim is not None:
+            ax.set_ylim(*manual_ylim)
         else:
-            ax.set_ylim(-2.0, 2.0)
+            ax.set_ylim(lib.auto_ylim(np.concatenate((
+                member_ts.rmse_improvement_pct.to_numpy(dtype=float),
+                method_mean.rmse_improvement_pct.to_numpy(dtype=float),
+            ))))
         ax.grid(alpha=0.25)
     axes[0].legend(ncol=2, fontsize=7, frameon=False)
     axes[2].set_ylabel("paired RMSE improvement vs NR (%)")
     axes[2].set_xlabel("forecast time (h)")
     axes[3].set_xlabel("forecast time (h)")
-    fig.suptitle("Ocean/TSK errors improved; flux errors did not "
-                 "(0-300 km ocean, every 0.5 h, 0-6 h)", fontsize=10.5,
-                 fontweight="bold")
+    fig.suptitle("Early ocean/TSK improvement does not translate into "
+                 "heat-flux skill", fontsize=10.5, fontweight="bold")
     fig.text(0.5, -0.01,
-             "Error reference: NR. Thin lines: six paired members; thick: "
-             "member-equal mean. Members and consecutive times are not "
-             "independent typhoon samples.",
+             "0-300 km ocean, every 0.5 h, 0-6 h. Error reference: NR. "
+             "Thin lines: six paired members; thick: member-equal mean. "
+             "Consecutive times and members are not independent typhoon "
+             "samples.",
              ha="center", fontsize=6.5, color="#4D4D4D")
     return fig, summary
 
 
-def _budget_groups(budget, flux, window):
-    """图 2 单面板的分组(方法 × 子集),顺序固定。"""
+def _budget_groups(budget, flux, window, annotate_members: bool = False):
+    """图 2 单面板的分组(方法 × 子集),顺序固定为
+    EAKF all、EAKF TSK-imp、QCF-RHF all、QCF-RHF TSK-imp。
+
+    标签不含 early/late(时段写在面板标题里);annotate_members=True 时
+    (个别组成员数与 6 不同)在标签第三行标注成员数。
+    """
     groups = []
     for method in METHODS:
-        for subset, tag in (("all_common", "all"), ("sst_improved", "TSK-imp")):
+        for subset, tag in FIG2_SUBSET_LABELS.items():
             row = budget[(budget.window == window)
                          & (budget.method == method)
                          & (budget.variable == flux)
@@ -712,25 +745,43 @@ def _budget_groups(budget, flux, window):
                 s = float(row.mean_member_increment_square_term.iloc[0])
                 dm = float(row.mean_member_delta_mse_direct.iloc[0])
                 n_members = int(row.n_members.iloc[0])
-                period = "early" if window.startswith("early") else "late"
-                label = f"{METHOD_LABELS[method]}\n{tag}\n{period}"
-                groups.append({"method": method, "subset": subset,
-                               "window": window, "label": label,
-                               "c": c, "s": s, "dm": dm,
-                               "n_members": n_members})
             else:
-                groups.append({"method": method, "subset": subset,
-                               "window": window,
-                               "label": f"{METHOD_LABELS[method]}\n{tag}\n{period}",
-                               "c": np.nan, "s": np.nan, "dm": np.nan,
-                               "n_members": 0})
+                c = s = dm = np.nan
+                n_members = 0
+            label = f"{METHOD_LABELS[method]}\n{tag}"
+            if annotate_members:
+                label += f"\nn={n_members}"
+            groups.append({"method": method, "subset": subset,
+                           "window": window, "label": label,
+                           "c": c, "s": s, "dm": dm,
+                           "n_members": n_members})
     return groups
 
 
+def _budget_bar(ax, xpos, values, colors, metric):
+    """图 2 三种预算量的固定外观(同一方法色,不依赖透明度区分):
+
+    C   实心方法色;S 白底+方法色斜纹;ΔMSE 方法色底+白色点纹。
+    三者同面板同尺度,ΔMSE=C+S 关系由图例与图注明确。
+    """
+    if metric == "c":
+        ax.bar(xpos, values, FIG2_BAR_WIDTH, color=colors,
+               edgecolor="white", linewidth=0.4)
+    elif metric == "s":
+        ax.bar(xpos, values, FIG2_BAR_WIDTH, facecolor="white",
+               edgecolor=colors, linewidth=0.9, hatch="////")
+    else:
+        ax.bar(xpos, values, FIG2_BAR_WIDTH, color=colors,
+               edgecolor="white", linewidth=0.8, hatch="....")
+
+
 def fig2_budget_windows(conditional):
-    """图 2:实际通量误差预算 ΔMSE=C+S,早期 vs 后期,全域 vs TSK 改善子集。
+    """图 2:实际通量误差预算 ΔMSE=C+S,四面板按
+    左上 HFX early / 右上 HFX late / 左下 LH early / 右下 LH late。
 
     先成员内对时次等权平均,再跨成员等权;正 ΔMSE=误差增加。
+    返回 (fig, budget, panel_map),panel_map 供独立面板导出,
+    名字与内容一一对应(lib.fig2_panel_map)。
     """
     budget = lib.budget_summary_by_window(
         conditional, region=EVIDENCE_REGION,
@@ -738,52 +789,71 @@ def fig2_budget_windows(conditional):
         windows=lib.WINDOWS,
     )
     budget = budget[budget.variable.isin(("hfx", "lh"))]
-    fig, axes = plt.subplots(2, 2, figsize=(7.2, 6.6), constrained_layout=True)
-    windows_order = ("early_0p5_2h", "late_3_6h")
-    for ax_row, flux in zip(axes, ("hfx", "lh")):
-        for ax_col, window in zip(ax_row, windows_order):
-            groups = _budget_groups(budget, flux, window)
-            x = np.arange(len(groups))
-            width = 0.25
-            for offset, (metric, label, hatch) in enumerate((
-                    ("c", "C = 2<e·δF>", ""),
-                    ("s", "S = <δF²>", ""),
-                    ("dm", "ΔMSE = C+S", "//"))):
-                vals = [g[metric] for g in groups]
-                colors = [METHOD_COLORS[g["method"]] for g in groups]
-                ax_col.bar(x + (offset - 1) * width, vals, width, label=label,
-                           color=colors, alpha=0.75 if metric != "dm" else 1.0,
-                           hatch=hatch if metric == "dm" else "",
-                           edgecolor="white")
-            ax_col.axhline(0.0, color="#4D4D4D", lw=0.8)
-            ax_col.set_xticks(x, [g["label"] for g in groups], fontsize=6,
-                              rotation=30, ha="right")
-            ax_col.set_title(f"{flux.upper()}  (W m$^{{-2}})^2$", loc="left",
-                             fontsize=9)
-            ax_col.grid(alpha=0.25, axis="y")
-            ax_col.annotate(
-                "n_members: "
-                + ", ".join(f"{g['method']}-{g['subset'].replace('_', '-')}="
-                            f"{g['n_members']}" for g in groups),
-                (0.5, -0.42), xycoords="axes fraction", ha="center",
-                fontsize=5.5, color="#4D4D4D")
-    axes[0, 0].legend(fontsize=6.5, frameon=False, loc="upper right")
-    fig.suptitle("Actual flux error budget ΔMSE = C + S: early vs late, "
-                 "domain vs TSK-improved subset", fontsize=10.5,
-                 fontweight="bold")
-    fig.text(0.5, -0.02,
-             "Member-window means, then equal-weight across members; "
-             "(W m$^{-2})^2$. Early loss is direction-dominated (C>0); "
-             "late C turns negative but S offsets it.",
+    # 显式布局(不再用 constrained_layout:越界注释曾致 axes 塌缩警告)
+    fig, axes = plt.subplots(2, 2, figsize=FIG2_SIZE_INCH,
+                             constrained_layout=False)
+    fig.suptitle("Actual flux error budget $\\Delta$MSE = C + S: "
+                 "early vs late, domain vs TSK-improved subset",
+                 fontsize=10.5, fontweight="bold", y=0.995)
+    # 共享图例:方法配色 + C/S/ΔMSE 三种外观(中性色演示)
+    legend_handles = (
+        [Patch(facecolor=METHOD_COLORS[m], label=METHOD_LABELS[m])
+         for m in METHODS]
+        + [Patch(facecolor="#7A7A7A", label="C = 2$\\langle e\\,\\delta F\\rangle$"),
+           Patch(facecolor="white", edgecolor="#7A7A7A", hatch="////",
+                 label="S = $\\langle\\delta F^2\\rangle$"),
+           Patch(facecolor="#7A7A7A", edgecolor="white", hatch="....",
+                 label="$\\Delta$MSE = C + S")]
+    )
+    fig.legend(handles=legend_handles, loc="upper center",
+               bbox_to_anchor=(0.5, 0.955), ncol=5, fontsize=6.5,
+               frameon=False, handlelength=1.6, columnspacing=1.2)
+    fig.subplots_adjust(top=0.87, bottom=0.13, left=0.09, right=0.98,
+                        hspace=0.48, wspace=0.22)
+
+    panel_axes = lib.fig2_panel_map(axes)
+    panel_contents = (
+        ("hfx", "early_0p5_2h"), ("hfx", "late_3_6h"),
+        ("lh", "early_0p5_2h"), ("lh", "late_3_6h"),
+    )
+    uniform_members = lib.fig2_uniform_members(budget, expected=N_PAIR_MEMBERS)
+    for ax, (flux, window) in zip(panel_axes.values(), panel_contents):
+        groups = _budget_groups(budget, flux, window,
+                                annotate_members=not uniform_members)
+        x = np.arange(len(groups))
+        colors = [METHOD_COLORS[g["method"]] for g in groups]
+        for offset, metric in enumerate(("c", "s", "dm")):
+            _budget_bar(ax, x + (offset - 1) * FIG2_BAR_WIDTH,
+                        [g[metric] for g in groups], colors, metric)
+        ax.axhline(0.0, color="#4D4D4D", lw=0.8)
+        ax.set_xticks(x, [g["label"] for g in groups], fontsize=6.2,
+                      rotation=0)
+        ax.set_title(f"{flux.upper()} - {WINDOW_TITLES[window]}", loc="left",
+                     fontsize=9)
+        ax.grid(alpha=0.25, axis="y")
+    for ax in (panel_axes["u2_hfx_early"], panel_axes["u2_lh_early"]):
+        ax.set_ylabel("(W m$^{-2})^2$")
+    members_note = (
+        f"all groups: {N_PAIR_MEMBERS} paired members"
+        if uniform_members else "labels show per-group member counts n="
+    )
+    fig.text(0.5, 0.015,
+             "Member-time means, then equal-weight across members "
+             f"({members_note}); units (W m$^{{-2}})^2$. Early loss is "
+             "direction-dominated (C>0); late C turns negative but S "
+             "offsets it. $\\Delta$MSE = C + S holds for every group.",
              ha="center", fontsize=6.5, color="#4D4D4D")
-    return fig, budget
+    return fig, budget, panel_axes
 
 
 def fig3_sst_response_lh(focus_quality, focus_metrics):
-    """图 3:LH 海温替换响应与质量覆盖(0-300 km TSK 改善子集,早 vs 后)。
+    """图 3:LH 的 TSK 替换响应与质量覆盖(0-300 km TSK 改善子集,早 vs 后)。
 
-    A 面板:联合/保守交集通过案例数;B 面板:SST/实际响应 RMS 比;
-    C 面板:C_SST。0 h 实际响应为零,不纳入(11/12 表只含早晚窗口)。
+    A 面板:联合/保守交集通过案例数(柱顶标 通过数/预期数,保守柱加
+    保留成员数);B 面板:SST/实际响应 RMS 比;C 面板:C_SST。
+    三个面板全部按 lib.FIG3_GROUP_KEYS 的显式「方法×窗口」键重排,
+    标签与数据一一对应;缺失组合呈现为缺失,不填零。
+    0 h 实际响应为零,不纳入(11/12 表只含早晚窗口)。
     """
     cov = lib.focus_coverage(focus_quality, subset="sst_improved")
     cov = cov[cov.variable == "lh"]
@@ -792,59 +862,112 @@ def fig3_sst_response_lh(focus_quality, focus_metrics):
         gates=(lib.GATE_JOINT, lib.GATE_CONSERVATIVE),
         variables=("lh",),
     )
-    fig, axes = plt.subplots(1, 3, figsize=(7.2, 3.4), constrained_layout=True)
-    x_labels = ["EAKF\nearly", "EAKF\nlate", "QCF-RHF\nearly", "QCF-RHF\nlate"]
-    x = np.arange(4)
-
-    ax = axes[0]
-    joint = cov.n_pass.to_numpy()
-    cons = cov.n_joint_and_regionA_pass.to_numpy()
-    ax.bar(x - 0.2, joint, 0.4, color="#9EC9E2", label="joint screen")
-    ax.bar(x + 0.2, cons, 0.4, color="#2C7FB8", label="conservative")
-    for xi, (jv, cv) in enumerate(zip(joint, cons)):
-        ax.text(xi - 0.2, jv + 0.3, str(int(jv)), ha="center", fontsize=6)
-        ax.text(xi + 0.2, cv + 0.3, str(int(cv)), ha="center", fontsize=6)
-    ax.set_xticks(x, x_labels, fontsize=7)
-    ax.set_ylabel("member-time cases (of 24)")
-    ax.set_title("A  Quality-screened cases (LH)", loc="left", fontsize=9)
-    ax.legend(fontsize=6.5, frameon=False)
-    ax.grid(alpha=0.25, axis="y")
-
-    ax = axes[1]
     met_j = met[met.gate == lib.GATE_JOINT]
     met_c = met[met.gate == lib.GATE_CONSERVATIVE]
-    ratio_j = met_j.mean_member_sst_to_actual_rms_ratio.to_numpy()
-    ratio_c = met_c.mean_member_sst_to_actual_rms_ratio.to_numpy()
-    ax.bar(x - 0.2, ratio_j, 0.4, color="#9EC9E2", label="joint screen")
-    ax.bar(x + 0.2, ratio_c, 0.4, color="#2C7FB8", label="conservative")
-    ax.axhline(1.0, color="#B2182B", lw=0.8, ls="--")
-    ax.text(3.35, 1.04, "ratio = 1", fontsize=6, color="#B2182B")
-    ax.set_xticks(x, x_labels, fontsize=7)
-    ax.set_ylabel("RMS(δF_SST) / RMS(δF_actual)")
-    ax.set_title("B  SST response vs actual response", loc="left", fontsize=9)
-    ax.legend(fontsize=6.5, frameon=False)
-    ax.grid(alpha=0.25, axis="y")
+    data = lib.fig3_panel_data(cov, met_j, met_c)
 
-    ax = axes[2]
-    csst_j = met_j.mean_member_cross_model_error_sst_response.to_numpy()
-    csst_c = met_c.mean_member_cross_model_error_sst_response.to_numpy()
-    ax.bar(x - 0.2, csst_j, 0.4, color="#9EC9E2", label="joint screen")
-    ax.bar(x + 0.2, csst_c, 0.4, color="#2C7FB8", label="conservative")
-    ax.axhline(0.0, color="#4D4D4D", lw=0.8)
-    ax.set_xticks(x, x_labels, fontsize=7)
-    ax.set_ylabel("C_SST = 2<e·δF_SST>  ((W m$^{-2})^2$)")
-    ax.set_title("C  C_SST vs actual error (LH)", loc="left", fontsize=9)
-    ax.legend(fontsize=6.5, frameon=False)
-    ax.grid(alpha=0.25, axis="y")
-
-    fig.suptitle("Offline SST-substitution response vs actual LH change "
+    fig, axes = plt.subplots(1, 3, figsize=FIG3_SIZE_INCH,
+                             constrained_layout=False)
+    fig.suptitle("Offline TSK-substitution response vs actual LH change "
                  "(0-300 km, TSK-improved subset)", fontsize=10,
-                 fontweight="bold")
-    fig.text(0.5, -0.03,
-             "δF_SST = f(TSK_strong, weak inputs) - f(TSK_weak, weak inputs); "
-             "TSK substituted, not OM_TMP. C_SST is diagnostic, not a causal "
-             "fraction. 0 h has zero actual response (excluded).",
-             ha="center", fontsize=6.2, color="#4D4D4D")
+                 fontweight="bold", y=0.98)
+    legend_handles = [
+        Patch(facecolor=SCREEN_COLORS["joint"], label="joint screen"),
+        Patch(facecolor=SCREEN_COLORS["conservative"],
+              label="conservative (joint $\\wedge$ Phase A)"),
+    ]
+    fig.legend(handles=legend_handles, loc="upper center",
+               bbox_to_anchor=(0.5, 0.905), ncol=2, fontsize=6.5,
+               frameon=False, handlelength=1.4, columnspacing=1.4)
+    fig.subplots_adjust(top=0.76, bottom=0.22, left=0.07, right=0.99,
+                        wspace=0.34)
+
+    x = np.arange(len(data["keys"]))
+    missing_x = np.array([
+        i for i, key in enumerate(data["keys"])
+        if key in [tuple(m) for m in data["missing"]]
+    ], dtype=float)
+
+    def _mark_missing(ax, ymax):
+        for xi in missing_x:
+            ax.text(xi, 0.5 * ymax, "missing", rotation=90, ha="center",
+                    va="center", fontsize=5.5, color="#7A7A7A")
+
+    # ---- A:质量覆盖(通过数/预期数,保守柱加保留成员数) ----
+    ax = axes[0]
+    ax.bar(x - 0.2, data["joint_pass"], 0.4, color=SCREEN_COLORS["joint"])
+    ax.bar(x + 0.2, data["cons_pass"], 0.4,
+           color=SCREEN_COLORS["conservative"])
+    ymax_a = float(np.nanmax([
+        np.nanmax(data["joint_pass"]), np.nanmax(data["cons_pass"]),
+        np.nanmax(data["joint_den"]),
+    ])) if np.isfinite(data["joint_den"]).any() else 1.0
+    for xi in range(len(data["keys"])):
+        jv, jden = data["joint_pass"][xi], data["joint_den"][xi]
+        cv, cden = data["cons_pass"][xi], data["cons_den"][xi]
+        mem = data["cons_members"][xi]
+        if np.isfinite(jv):
+            ax.text(xi - 0.2, jv + 0.02 * ymax_a, f"{jv:g}/{jden:g}",
+                    ha="center", va="bottom", fontsize=5.6)
+        if np.isfinite(cv):
+            ax.text(xi + 0.2, cv + 0.02 * ymax_a,
+                    f"{cv:g}/{cden:g}\nmem {mem:g}/{N_PAIR_MEMBERS}",
+                    ha="center", va="bottom", fontsize=5.6)
+    ax.set_ylim(0.0, 1.22 * ymax_a)
+    _mark_missing(ax, ymax_a)
+    ax.set_xticks(x, data["labels"], fontsize=FIG3_XLABEL_FONTSIZE)
+    ax.set_ylabel("screened member-time cases")
+    ax.set_title("A  Quality-screened cases (LH)", loc="left", fontsize=9)
+    ax.grid(alpha=0.25, axis="y")
+
+    # ---- B:SST / 实际响应 RMS 比(ratio=1 参考线) ----
+    ax = axes[1]
+    ax.bar(x - 0.2, data["ratio_joint"], 0.4, color=SCREEN_COLORS["joint"])
+    ax.bar(x + 0.2, data["ratio_conservative"], 0.4,
+           color=SCREEN_COLORS["conservative"])
+    ax.axhline(1.0, color="#B2182B", lw=0.8, ls="--")
+    ymax_b = float(np.nanmax(np.concatenate((
+        data["ratio_joint"], data["ratio_conservative"], [1.0]))))
+    ax.set_ylim(0.0, 1.15 * ymax_b)
+    ax.text(0.98, 1.0 / (1.15 * ymax_b) + 0.02, "ratio = 1",
+            transform=ax.get_yaxis_transform(), ha="right", fontsize=6,
+            color="#B2182B")
+    _mark_missing(ax, ymax_b)
+    ax.set_xticks(x, data["labels"], fontsize=FIG3_XLABEL_FONTSIZE)
+    ax.set_ylabel(r"RMS($\delta F_{\mathrm{TSK}}$) / RMS($\delta F_{\mathrm{act}}$)")
+    ax.set_title("B  TSK response vs actual response", loc="left", fontsize=9)
+    ax.grid(alpha=0.25, axis="y")
+
+    # ---- C:C_SST(保留零线) ----
+    ax = axes[2]
+    ax.bar(x - 0.2, data["csst_joint"], 0.4, color=SCREEN_COLORS["joint"])
+    ax.bar(x + 0.2, data["csst_conservative"], 0.4,
+           color=SCREEN_COLORS["conservative"])
+    ax.axhline(0.0, color="#4D4D4D", lw=0.8)
+    finite_c = np.concatenate((data["csst_joint"], data["csst_conservative"]))
+    finite_c = finite_c[np.isfinite(finite_c)]
+    if finite_c.size:
+        ax.set_ylim(min(0.0, finite_c.min()) * 1.15,
+                    max(0.0, finite_c.max()) * 1.15)
+    _mark_missing(ax, float(np.nanmax(np.abs(finite_c))) if finite_c.size else 1.0)
+    ax.set_xticks(x, data["labels"], fontsize=FIG3_XLABEL_FONTSIZE)
+    ax.set_ylabel(r"$C_{\mathrm{TSK}}$ ((W m$^{-2})^2$)")
+    ax.set_title("C  $C_{\\mathrm{TSK}}$ vs actual error (LH)", loc="left",
+                 fontsize=9)
+    ax.grid(alpha=0.25, axis="y")
+
+    fig.text(0.5, 0.015,
+             "$\\delta F_{\\mathrm{TSK}}$ = f(TSK_strong, weak inputs) - "
+             "f(TSK_weak, weak inputs); TSK substituted, not OM_TMP. The "
+             "RMS ratio compares amplitudes and is not a causal share; "
+             "$C_{\\mathrm{TSK}}$ = 2$\\langle e\\,\\delta F_{\\mathrm{TSK}}"
+             "\\rangle$ crosses the actual weak-flux error with the "
+             "substitution response, not a causal fraction of $\\Delta$MSE. "
+             "0 h excluded (zero actual response). Missing group "
+             "combinations are shown as missing, not zero. Conservative "
+             "bar labels give retained members of "
+             f"{N_PAIR_MEMBERS}.",
+             ha="center", fontsize=6.0, color="#4D4D4D")
     return fig, {"coverage": cov, "metrics_conservative": met_c,
                  "metrics_joint": met_j}
 
@@ -955,20 +1078,15 @@ def build_updated_evidence():
     plt.close(fig1)
 
     # ---- 图 2 ----
-    fig2, budget = fig2_budget_windows(evidence["conditional"])
+    fig2, budget, fig2_panels = fig2_budget_windows(evidence["conditional"])
     budget["region"] = EVIDENCE_REGION
     budget["aggregation"] = "member-time mean, then equal-weight members"
     budget["note"] = "delta_mse = cross_term + increment_square_term"
     _export_source_csv(budget, "fig2_budget_windows_source.csv")
     fig2.savefig(UPDATED_FIG_DIR / f"fig2_budget_windows.{fmt}",
                  dpi=dpi if fmt == "png" else None,
-                 bbox_inches="tight", facecolor="white")
-    save_individual_panels(fig2, {
-        "u2_hfx_early": [fig2.axes[0]],
-        "u2_lh_early": [fig2.axes[1]],
-        "u2_hfx_late": [fig2.axes[2]],
-        "u2_lh_late": [fig2.axes[3]],
-    }, output_dir=UPDATED_PANEL_DIR)
+                 facecolor="white")
+    save_individual_panels(fig2, fig2_panels, output_dir=UPDATED_PANEL_DIR)
     plt.close(fig2)
 
     # ---- 图 3 ----
@@ -982,7 +1100,7 @@ def build_updated_evidence():
             _export_source_csv(table, f"fig3_sst_response_{table_name}.csv")
     fig3.savefig(UPDATED_FIG_DIR / f"fig3_sst_response_lh.{fmt}",
                  dpi=dpi if fmt == "png" else None,
-                 bbox_inches="tight", facecolor="white")
+                 facecolor="white")
     save_individual_panels(fig3, {
         "u3a_quality_cases": [fig3.axes[0]],
         "u3b_rms_ratio": [fig3.axes[1]],
