@@ -12,11 +12,14 @@
          analysis_d03/analyze_d03.py 的忠实移植,仅去掉文件读写)
       -> 图 1/2/3 的 member_metrics / conditional / focus_quality / focus_metrics
 
-运行成本:真实模式完整计算约 2 小时(诊断三离线通量重建占绝大部分)。
-结果以 pickle 缓存(非 CSV)存放于 cache_dir,CACHE_POLICY 控制:
+运行成本:真实模式完整计算约 2.5 小时(诊断三离线通量重建占绝大部分)。
+缓存分两级,均以 pickle 存放于 cache_dir(CACHE_POLICY 控制):
     "auto"    缓存存在且指纹一致则复用,否则重算(默认)
     "refresh" 强制重算并覆盖缓存
     "reuse"   只读缓存,缺失或指纹不符即报错
+  - 整体缓存:全部阶段完成后写入的最终结果包(重跑图件秒级完成);
+  - 阶段检查点:verify_01/02/03 各自算完立即写入,作业中断后重跑
+    会逐阶段复用,不必从 verify_01 重来。
 指纹由运行模式、三个诊断的配置快照与相关源码文件的尺寸/修改时间构成,
 任何配置或代码改动都会自动失效旧缓存。
 """
@@ -321,7 +324,7 @@ def analyze_d03_tables(
 
 
 # =====================================================================
-# 从原始 wrfout 计算(verify_diag compute() 串联)
+# 从原始 wrfout 计算(verify_diag compute() 串联;逐阶段检查点)
 # =====================================================================
 def _evidence_configs(mode: str) -> tuple:
     """按目标模式覆盖三个诊断的 CONFIG(mode 之外全部沿用脚本默认)。"""
@@ -332,44 +335,104 @@ def _evidence_configs(mode: str) -> tuple:
     )
 
 
-def compute_raw_evidence(mode: str = "real", verbose: bool = True) -> dict:
+def _stage_cache_path(cache_dir, mode: str, fingerprint: str, stage: str) -> Path:
+    return Path(cache_dir) / f"raw_evidence_{mode}_{fingerprint[:16]}_stage_{stage}.pkl"
+
+
+def _load_stage(path: Path, fingerprint: str):
+    """读取与指纹匹配的阶段缓存;缺失/损坏/指纹不符一律返回 None(重算)。"""
+    try:
+        with open(path, "rb") as handle:
+            cached = pickle.load(handle)
+    except (OSError, pickle.UnpicklingError, EOFError):
+        return None
+    if cached.get("fingerprint") == fingerprint:
+        return cached["frames"]
+    return None
+
+
+def _save_stage(path: Path, fingerprint: str, frames: dict) -> None:
+    """写阶段检查点:先写临时文件再原子替换,中断不会留下半个 pickle。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as handle:
+        pickle.dump({"fingerprint": fingerprint, "frames": frames}, handle,
+                    protocol=pickle.HIGHEST_PROTOCOL)
+    tmp.replace(path)
+
+
+def compute_raw_evidence(mode: str = "real", verbose: bool = True,
+                         stage_cache_dir=None, fingerprint: str | None = None) -> dict:
     """从原始 wrfout(或合成数据)一路算到图 1/2/3 所需全部表。
 
     mode="real" 读服务器/本地真实 wrfout(路径与试验名沿用 verify_diag 默认
     配置);mode="synthetic" 用固定种子合成数据(冒烟测试用,无真实 I/O)。
+    stage_cache_dir 与 fingerprint 同时给定时,每个诊断算完立即写检查点,
+    重跑时逐阶段复用(verify_03 约 2 小时,中断后不必从 verify_01 重来)。
     """
     cfg1, cfg2, cfg3 = _evidence_configs(mode)
     tag = mode.upper()
+    stage_frames: dict[str, dict] = {}
 
-    if verbose:
-        print(f"[{tag}] verify_01: member metrics + classification ...", flush=True)
-    f1 = v1.compute(cfg1)
-    if verbose:
-        print(
-            f"[{tag}] verify_01 done: {len(f1['metrics'])} metric rows, "
-            f"{len(f1['classifications'])} classification rows", flush=True,
-        )
+    def _runner_v1():
+        if verbose:
+            print(f"[{tag}] verify_01: member metrics + classification ...", flush=True)
+        f1 = v1.compute(cfg1)
+        if verbose:
+            print(
+                f"[{tag}] verify_01 done: {len(f1['metrics'])} metric rows, "
+                f"{len(f1['classifications'])} classification rows", flush=True,
+            )
+        return f1
 
-    if verbose:
-        print(f"[{tag}] verify_02: flux error budget ...", flush=True)
-    f2 = v2.compute(cfg2)
-    if verbose:
-        print(
-            f"[{tag}] verify_02 done: {len(f2['budgets'])} budget rows, "
-            f"{len(f2['conditional'])} conditional rows", flush=True,
-        )
+    def _runner_v2():
+        if verbose:
+            print(f"[{tag}] verify_02: flux error budget ...", flush=True)
+        f2 = v2.compute(cfg2)
+        if verbose:
+            print(
+                f"[{tag}] verify_02 done: {len(f2['budgets'])} budget rows, "
+                f"{len(f2['conditional'])} conditional rows", flush=True,
+            )
+        return f2
 
-    if verbose:
-        print(
-            f"[{tag}] verify_03: fixed-atmosphere SST replacement "
-            "(real mode may take ~2 h) ...", flush=True,
-        )
-    f3 = v3.compute(cfg3)
-    if verbose:
-        print(
-            f"[{tag}] verify_03 done: phaseA={len(f3['phase_a'])}, "
-            f"phaseB={len(f3['phase_b'])}, joint={len(f3['joint'])} rows", flush=True,
-        )
+    def _runner_v3():
+        if verbose:
+            print(
+                f"[{tag}] verify_03: fixed-atmosphere SST replacement "
+                "(real mode may take ~2 h) ...", flush=True,
+            )
+        f3 = v3.compute(cfg3)
+        if verbose:
+            print(
+                f"[{tag}] verify_03 done: phaseA={len(f3['phase_a'])}, "
+                f"phaseB={len(f3['phase_b'])}, joint={len(f3['joint'])} rows", flush=True,
+            )
+        return f3
+
+    for stage, runner, expected in (
+        ("verify01", _runner_v1, ("status", "metrics", "classifications")),
+        ("verify02", _runner_v2, ("status", "budgets", "conditional")),
+        ("verify03", _runner_v3, ("status", "phase_a", "phase_b", "joint")),
+    ):
+        frames = None
+        if stage_cache_dir is not None and fingerprint is not None:
+            path = _stage_cache_path(stage_cache_dir, mode, fingerprint, stage)
+            cached = _load_stage(path, fingerprint)
+            if cached is not None and all(key in cached for key in expected):
+                frames = cached
+                if verbose:
+                    print(f"[{tag}] {stage}: reuse stage cache {path.name}", flush=True)
+        if frames is None:
+            frames = runner()
+            if stage_cache_dir is not None and fingerprint is not None:
+                path = _stage_cache_path(stage_cache_dir, mode, fingerprint, stage)
+                _save_stage(path, fingerprint, frames)
+                if verbose:
+                    print(f"[{tag}] {stage}: stage cache saved {path.name}", flush=True)
+        stage_frames[stage] = frames
+
+    f1, f2, f3 = stage_frames["verify01"], stage_frames["verify02"], stage_frames["verify03"]
 
     if verbose:
         print(f"[{tag}] analyze_d03: quality stratification + focus tables ...", flush=True)
@@ -450,7 +513,8 @@ def ensure_raw_evidence(
             f"for mode={mode!r}; run with 'auto' or 'refresh' first"
         )
 
-    frames = compute_raw_evidence(mode=mode)
+    frames = compute_raw_evidence(mode=mode, stage_cache_dir=cache_dir,
+                                  fingerprint=fingerprint)
     cache_dir.mkdir(parents=True, exist_ok=True)
     with open(cache_path, "wb") as handle:
         pickle.dump({"fingerprint": fingerprint, "frames": frames}, handle,
