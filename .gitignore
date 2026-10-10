@@ -11,3 +11,6 @@
 !*.fkc
 # 4. 允许 .gitignore 本身
 !.gitignore
+
+# LACC 散点诊断使用说明
+!plot_scripts/README_diag_LACC_member_scatter.md
