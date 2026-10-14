@@ -14,3 +14,6 @@
 
 # LACC 散点诊断使用说明
 !plot_scripts/README_diag_LACC_member_scatter.md
+
+# 等权 LACC 的 NR 辅助 SST 更新方向筛选说明
+!4assimilation/1convert_obs/README_filter_LACC_sst_direction.md

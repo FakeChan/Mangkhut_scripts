@@ -22,6 +22,16 @@
 # per-observation time-weighting step (compute_adaptive_LACC.py) runs between
 # the ensemble stage and obs conversion; downstream obs2DART_LACC.py /
 # merge_FO_in_one_file.py then consume its pre-filtered weighted products.
+#
+# Optional and OFF by default: with USE_NR_SST_DIRECTION_FILTER=1 an extra
+# screen (filter_LACC_sst_direction.py) runs on the EQUAL-WEIGHT LACC set.  It
+# deletes every observation whose ensemble-implied background-SST mean update
+# points the opposite way to the NR prior error at that point, refines the
+# original clear-sky mask with the result and hands THAT mask to the same
+# obs2DART_LACC.py / merge_FO_in_one_file.py stages.  It requires the
+# equal-weight LACC pipeline (LACC, OptimizWeight=0, USE_CLEAR_SKY_MASK=1,
+# RUN_OBS_CONVERT=1, RUN_HX_MERGE=1, RUN_VALIDATION=1) so a new mask can never be
+# paired with products built from the old one.
 #================================================================================
 set -euo pipefail
 
@@ -96,9 +106,35 @@ OVERWRITE_OBS_SEQ="${OVERWRITE_OBS_SEQ:-1}"
 #   ADAPTIVE_SST_MEMBER_PATTERN="preassim_member_{mem:04d}_{domain}.nc"
 # (that file set uses WRF XLAND 1=land/2=water, so you also need
 #   ADAPTIVE_SST_LAND_MASK_VAR=XLAND  ADAPTIVE_SST_LAND_MASK_WATER_ABOVE=1.5).
-BASE_DIR="/share/home/lililei1/kcfu/tc_mangkhut"
+BASE_DIR="${BASE_DIR:-/share/home/lililei1/kcfu/tc_mangkhut}"
 ADAPTIVE_SST_BG_DIR="${ADAPTIVE_SST_BG_DIR:-${BASE_DIR}/4assimilation/0mem_all_time/cyclingDA/${CURRENT_TIME}}"
 ADAPTIVE_SST_MEMBER_PATTERN="${ADAPTIVE_SST_MEMBER_PATTERN:-firstguess_{domain}.mem{mem:03d}}"
+
+# --- NR-assisted SST update-direction screen (equal-weight LACC only) ---
+# OFF by default: with 0 the script behaves exactly as before (same paths, same
+# files, same obs_seq name).  See the header for the switches it requires.
+USE_NR_SST_DIRECTION_FILTER="${USE_NR_SST_DIRECTION_FILTER:-0}"
+# Appended to the work directory AND to the final obs_seq name while the screen
+# is on, so a screened run cannot silently reuse or overwrite the baseline
+# intermediates.
+NR_SST_DIRECTION_SUFFIX="_nr_sst_direction"
+
+# The assimilation-time ensemble the screen samples for the prior SST.  This is
+# an explicitly configured background: the screen never goes looking for another
+# firstguess/preassim file, and the background must be the SAME ensemble that
+# produced the member Hx being screened.
+NR_SST_BG_DIR="${NR_SST_BG_DIR:-${BASE_DIR}/4assimilation/0mem_all_time/cyclingDA/${CURRENT_TIME}}"
+# The default is held in its own variable: inside a ${VAR:-...} expansion bash
+# stops at the first unescaped '}', which silently mangles a pattern that itself
+# contains braces.
+NR_SST_BG_MEMBER_PATTERN_DEFAULT="firstguess_{domain}.mem{mem:03d}"
+NR_SST_BG_MEMBER_PATTERN="${NR_SST_BG_MEMBER_PATTERN:-${NR_SST_BG_MEMBER_PATTERN_DEFAULT}}"
+
+# The nature run, dated with the observation date used by the converters
+# (obs2DART_LACC.py hard-codes year 2018, month 9) and the CENTER_* fields.
+# Override NR_SST_CENTER_TIME or NR_SST_NR_FILE to point somewhere else.
+NR_SST_CENTER_TIME="${NR_SST_CENTER_TIME:-2018-09-${CENTER_DAY}_${CENTER_HOUR}:${CENTER_MIN}:00}"
+NR_SST_NR_FILE="${NR_SST_NR_FILE:-${BASE_DIR}/NR_wrfout/2domain/wrfout_d02_${NR_SST_CENTER_TIME}}"
 
 #==============================================================================
 # fixed paths
@@ -107,7 +143,9 @@ HX_DIR="${BASE_DIR}/3create_obs/hx_rttov"
 CONVERT_DIR="${BASE_DIR}/4assimilation/1convert_obs"
 TEXT_TO_OBS_RUN_DIR="${CONVERT_DIR}/run_dir"
 
-PYTHON_BIN="/share/home/lililei1/kcfu/anaconda/envs/wrf/bin/python"
+# Overridable so the workflow can be exercised locally; the default is the
+# deployed interpreter.
+PYTHON_BIN="${PYTHON_BIN:-/share/home/lililei1/kcfu/anaconda/envs/wrf/bin/python}"
 
 #-----------------------------------------------------------------------------
 # guards
@@ -146,6 +184,61 @@ if [[ "${OptimizWeight}" == "1" ]]; then
         echo "ERROR: OptimizWeight=1 requires USE_CLEAR_SKY_MASK=1: the adaptive products are pre-filtered by the unified LACC mask, so downstream row counts must match that filtering." >&2
         exit 1
     fi
+fi
+
+if [[ "${USE_NR_SST_DIRECTION_FILTER}" != "0" && "${USE_NR_SST_DIRECTION_FILTER}" != "1" ]]; then
+    echo "ERROR: USE_NR_SST_DIRECTION_FILTER must be 0 or 1, got '${USE_NR_SST_DIRECTION_FILTER}'" >&2
+    exit 1
+fi
+
+# The screen rewrites which observations are assimilated, so it may only run in
+# the equal-weight LACC pipeline that regenerates EVERY product from the shared
+# mask.  All of this is checked before any data-producing stage runs: a
+# half-satisfied combination must not leave an obs_input or a merged Hx that was
+# built from the old mask.
+if [[ "${USE_NR_SST_DIRECTION_FILTER}" == "1" ]]; then
+    NR_SST_DIRECTION_PROBLEMS=""
+    if [[ "${EXPERIMENT_MODE}" != "LACC" ]]; then
+        NR_SST_DIRECTION_PROBLEMS="${NR_SST_DIRECTION_PROBLEMS}
+  - EXPERIMENT_MODE must be LACC (got '${EXPERIMENT_MODE}')"
+    fi
+    if [[ "${OptimizWeight}" != "0" ]]; then
+        NR_SST_DIRECTION_PROBLEMS="${NR_SST_DIRECTION_PROBLEMS}
+  - OptimizWeight must be 0: the screen is defined on the equal-weight LACC products (got '${OptimizWeight}')"
+    fi
+    if [[ "${USE_CLEAR_SKY_MASK}" != "1" ]]; then
+        NR_SST_DIRECTION_PROBLEMS="${NR_SST_DIRECTION_PROBLEMS}
+  - USE_CLEAR_SKY_MASK must be 1: the screen refines the original clear-sky mask (got '${USE_CLEAR_SKY_MASK}')"
+    fi
+    if [[ "${RUN_OBS_CONVERT}" != "1" ]]; then
+        NR_SST_DIRECTION_PROBLEMS="${NR_SST_DIRECTION_PROBLEMS}
+  - RUN_OBS_CONVERT must be 1: the observation text must be regenerated from the merged mask (got '${RUN_OBS_CONVERT}')"
+    fi
+    if [[ "${RUN_HX_MERGE}" != "1" ]]; then
+        NR_SST_DIRECTION_PROBLEMS="${NR_SST_DIRECTION_PROBLEMS}
+  - RUN_HX_MERGE must be 1: the merged Hx must be regenerated from the merged mask (got '${RUN_HX_MERGE}')"
+    fi
+    if [[ "${RUN_VALIDATION}" != "1" ]]; then
+        NR_SST_DIRECTION_PROBLEMS="${NR_SST_DIRECTION_PROBLEMS}
+  - RUN_VALIDATION must be 1: the row counts of the merged mask must be checked (got '${RUN_VALIDATION}')"
+    fi
+    if [[ -n "${NR_SST_DIRECTION_PROBLEMS}" ]]; then
+        echo "ERROR: USE_NR_SST_DIRECTION_FILTER=1 is not compatible with this configuration:" >&2
+        echo "${NR_SST_DIRECTION_PROBLEMS}" >&2
+        echo "       The screened mask, the observation conversion, the Hx merge and the count validation all belong to the same run." >&2
+        exit 1
+    fi
+fi
+
+# Suffix handling happens BEFORE the final paths and the overwrite check are
+# computed, so OBS_SEQ_OUT_FILE, its existing-file test and the work directory
+# all see the suffixed name at once.
+NR_SST_DIRECTION_TAG=""
+if [[ "${USE_NR_SST_DIRECTION_FILTER}" == "1" ]]; then
+    NR_SST_DIRECTION_TAG="${NR_SST_DIRECTION_SUFFIX}"
+fi
+if [[ -n "${NR_SST_DIRECTION_TAG}" && "${OBS_SEQ_OUT_NAME}" != *"${NR_SST_DIRECTION_TAG}" ]]; then
+    OBS_SEQ_OUT_NAME="${OBS_SEQ_OUT_NAME}${NR_SST_DIRECTION_TAG}"
 fi
 
 if [[ "${OBS_SEQ_OUT_NAME}" == */* ]]; then
@@ -266,10 +359,20 @@ else
     OBS_CONVERT_SCRIPT="${CONVERT_DIR}/obs2DART_test.py"
 fi
 
+# The observation file this run converts, resolved ONCE (an externally supplied
+# OBS_INPUT_FILE wins) and exported so that the NR-SST-direction screen and
+# obs2DART_LACC.py can never read two different files.  The default is exactly
+# the path obs2DART_LACC.py falls back to, so the baseline behaviour is
+# unchanged when the screen is off.
+if [[ "${EXPERIMENT_MODE}" == "LACC" ]]; then
+    OBS_INPUT_FILE="${OBS_INPUT_FILE:-${OBS_BT_DIR}/${OBS_BT_SUBDIR}/obs_${domain}_ch${ASSIM_CHANNEL}_totalline_withpert.txt}"
+    export OBS_INPUT_FILE
+fi
+
 #==============================================================================
 # single-test work area and fixed intermediate files
 #==============================================================================
-SINGLE_TEST_WORK_DIR="${CONVERT_DIR}/single_assim_test/${EXPERIMENT_MODE}_${CURRENT_TIME}_ch${ASSIM_CHANNEL}"
+SINGLE_TEST_WORK_DIR="${CONVERT_DIR}/single_assim_test/${EXPERIMENT_MODE}_${CURRENT_TIME}_ch${ASSIM_CHANNEL}${NR_SST_DIRECTION_TAG}"
 LOG_DIR="${SINGLE_TEST_WORK_DIR}/logs"
 mkdir -p "${LOG_DIR}"
 
@@ -584,6 +687,145 @@ else
 fi
 
 #==============================================================================
+# stage 3b: NR-assisted SST update-direction screen (equal-weight LACC only)
+#
+# Runs AFTER the truth / ensemble Hx generation and BEFORE the observation text
+# conversion.  The ORIGINAL clear-sky mask is kept here and is the screen's
+# input on every run (the merged mask is never fed back in, so repeated runs
+# cannot compound their deletions); the merged mask then replaces
+# CLEAR_SKY_MASK_FILE for the observation conversion, the Hx merge and the count
+# validation below.
+#==============================================================================
+if [[ "${USE_NR_SST_DIRECTION_FILTER}" == "1" ]]; then
+    log_stage "Running the NR SST update-direction screen"
+
+    ORIGINAL_CLEAR_SKY_MASK_FILE="${CLEAR_SKY_MASK_FILE}"
+    NR_SST_DIRECTION_FILTER_SCRIPT="${CONVERT_DIR}/filter_LACC_sst_direction.py"
+    NR_SST_DIRECTION_FILTER_DIR="${SINGLE_TEST_WORK_DIR}/nr_sst_direction_filter"
+    MERGED_CLEAR_SKY_MASK_FILE="${NR_SST_DIRECTION_FILTER_DIR}/clear_sky_and_nr_sst_direction_mask.txt"
+
+    if [[ ! -f "${NR_SST_DIRECTION_FILTER_SCRIPT}" ]]; then
+        echo "ERROR: the NR SST direction filter does not exist: ${NR_SST_DIRECTION_FILTER_SCRIPT}" >&2
+        exit 1
+    fi
+    if [[ ! -f "${ORIGINAL_CLEAR_SKY_MASK_FILE}" ]]; then
+        echo "ERROR: original clear-sky mask does not exist: ${ORIGINAL_CLEAR_SKY_MASK_FILE}" >&2
+        exit 1
+    fi
+    for _prefix_file in "${OBS_INPUT_FILE}" "${PARA_FILE}" "${LACC_TIMES_FILE}" \
+                        "${NR_SST_NR_FILE}" "${NR_SST_BG_DIR}"; do
+        if [[ ! -e "${_prefix_file}" ]]; then
+            echo "ERROR: NR SST direction filter input is missing: ${_prefix_file}" >&2
+            exit 1
+        fi
+    done
+
+    echo "Experiment mode:             ${EXPERIMENT_MODE}"
+    echo "Original clear-sky mask:     ${ORIGINAL_CLEAR_SKY_MASK_FILE}"
+    echo "Observation file:            ${OBS_INPUT_FILE}"
+    echo "Background directory:        ${NR_SST_BG_DIR}"
+    echo "Background member pattern:   ${NR_SST_BG_MEMBER_PATTERN}"
+    echo "NR file:                     ${NR_SST_NR_FILE}"
+
+    # Everything the bridge needs travels through the environment: no shell path
+    # is pasted into Python source, and the module is loaded by absolute path
+    # (this driver may be started from any working directory).
+    export NR_SST_FILTER_SCRIPT="${NR_SST_DIRECTION_FILTER_SCRIPT}"
+    export NR_SST_FILTER_PROJECT_ROOT="${BASE_DIR}"
+    export NR_SST_FILTER_HX_ROOT="${HX_DIR}"
+    export NR_SST_FILTER_OUTPUT_DIR="${NR_SST_DIRECTION_FILTER_DIR}"
+    export NR_SST_FILTER_CENTER_TIME="${NR_SST_CENTER_TIME}"
+    export NR_SST_FILTER_DOMAIN="${domain}"
+    export NR_SST_FILTER_SENSOR="${sensor}"
+    export NR_SST_FILTER_CHANNEL="${ASSIM_CHANNEL}"
+    export NR_SST_FILTER_MEMBERS="${ENS_SIZE}"
+    export NR_SST_FILTER_NOBS="${NOBS}"
+    export NR_SST_FILTER_EXPECTED_LAG_HOURS="${LACC_LAG_HOURS}"
+    export NR_SST_FILTER_OBS_FILE="${OBS_INPUT_FILE}"
+    export NR_SST_FILTER_ORIGINAL_MASK_FILE="${ORIGINAL_CLEAR_SKY_MASK_FILE}"
+    export NR_SST_FILTER_PROFILE_FILE="${PARA_FILE}"
+    export NR_SST_FILTER_LACC_TIMES_FILE="${LACC_TIMES_FILE}"
+    export NR_SST_FILTER_BACKGROUND_DIR="${NR_SST_BG_DIR}"
+    export NR_SST_FILTER_BACKGROUND_PATTERN="${NR_SST_BG_MEMBER_PATTERN}"
+    export NR_SST_FILTER_NR_FILE="${NR_SST_NR_FILE}"
+
+    # A short bridge: it only turns the exported values into an explicit Config
+    # and calls run().  The computation lives in the module, not here.
+    if ! "${PYTHON_BIN}" -I - 2>&1 <<'PYEOF' | tee "${LOG_DIR}/nr_sst_direction_filter.log"
+import importlib.util
+import math
+import os
+import sys
+from pathlib import Path
+
+script = Path(os.environ["NR_SST_FILTER_SCRIPT"]).resolve()
+spec = importlib.util.spec_from_file_location("nr_sst_direction_filter_bridge", script)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+nobs = int(os.environ["NR_SST_FILTER_NOBS"])
+side = math.isqrt(nobs)
+if side * side != nobs:
+    raise SystemExit(f"NOBS={nobs} is not a perfect square, so the Hx matrix side is unknown")
+
+config = module.Config(
+    project_root=Path(os.environ["NR_SST_FILTER_PROJECT_ROOT"]),
+    hx_root=Path(os.environ["NR_SST_FILTER_HX_ROOT"]),
+    output_dir=Path(os.environ["NR_SST_FILTER_OUTPUT_DIR"]),
+    center_time=os.environ["NR_SST_FILTER_CENTER_TIME"],
+    domain=os.environ["NR_SST_FILTER_DOMAIN"],
+    sensor=os.environ["NR_SST_FILTER_SENSOR"],
+    channel=int(os.environ["NR_SST_FILTER_CHANNEL"]),
+    member_start=1,
+    member_end=int(os.environ["NR_SST_FILTER_MEMBERS"]),
+    nobs_raw=nobs,
+    matrix_side=side,
+    expected_lag_hours=tuple(
+        int(value) for value in os.environ["NR_SST_FILTER_EXPECTED_LAG_HOURS"].split()
+    ),
+    obs_input_file=Path(os.environ["NR_SST_FILTER_OBS_FILE"]),
+    clear_sky_mask_file=Path(os.environ["NR_SST_FILTER_ORIGINAL_MASK_FILE"]),
+    profile_file=Path(os.environ["NR_SST_FILTER_PROFILE_FILE"]),
+    lacc_times_file=Path(os.environ["NR_SST_FILTER_LACC_TIMES_FILE"]),
+    background_dir=Path(os.environ["NR_SST_FILTER_BACKGROUND_DIR"]),
+    background_pattern=os.environ["NR_SST_FILTER_BACKGROUND_PATTERN"],
+    nr_file=Path(os.environ["NR_SST_FILTER_NR_FILE"]),
+)
+
+try:
+    payload = module.run(config)
+except module.NoObservationSurvivesError as refusal:
+    print(f"ERROR: {refusal}", file=sys.stderr)
+    module.print_summary(refusal.payload)
+    raise SystemExit(3)
+except (module.lag.DiagnosticError, ValueError, KeyError) as refusal:
+    print(f"ERROR: {refusal}", file=sys.stderr)
+    raise SystemExit(2)
+
+module.print_summary(payload)
+PYEOF
+    then
+        echo "ERROR: the NR SST update-direction screen did not produce a usable mask; stopping BEFORE the observation conversion." >&2
+        echo "       No observation was converted: the only mask the conversion may use is the one the screen would have accepted." >&2
+        exit 1
+    fi
+
+    if [[ ! -s "${MERGED_CLEAR_SKY_MASK_FILE}" ]]; then
+        echo "ERROR: the screen reported success but published no merged mask: ${MERGED_CLEAR_SKY_MASK_FILE}" >&2
+        exit 1
+    fi
+
+    # From here on the observation conversion, the Hx merge and the count
+    # validation all use the MERGED mask and nothing else.
+    CLEAR_SKY_MASK_FILE="${MERGED_CLEAR_SKY_MASK_FILE}"
+    export CLEAR_SKY_MASK_FILE
+    echo "Merged clear-sky + NR-SST-direction mask: ${CLEAR_SKY_MASK_FILE}"
+else
+    log_stage "Skipping the NR SST update-direction screen (USE_NR_SST_DIRECTION_FILTER=${USE_NR_SST_DIRECTION_FILTER})"
+fi
+
+#==============================================================================
 # stage 4: observation text conversion
 #==============================================================================
 if [[ "${RUN_OBS_CONVERT}" == "1" ]]; then
@@ -785,6 +1027,23 @@ else
     echo "Single-time obs error std:   ${OBS_ERR_STD} K"
 fi
 echo "Ensemble member count:       ${ENS_SIZE}"
+if [[ "${USE_NR_SST_DIRECTION_FILTER}" == "1" ]]; then
+    # The retained counts above already come from the MERGED mask; these lines
+    # spell out what the screen changed.
+    _nr_sst_original_rows=$(wc -l < "${ORIGINAL_CLEAR_SKY_MASK_FILE}")
+    _nr_sst_original_kept=$(awk '
+        NF == 1 && $1 == 1 { count++ }
+        END { print count + 0 }
+    ' "${ORIGINAL_CLEAR_SKY_MASK_FILE}")
+    echo "NR SST direction screen:     on"
+    echo "Original clear-sky kept:     ${_nr_sst_original_kept} of ${_nr_sst_original_rows}"
+    echo "  removed by the screen:     $(( _nr_sst_original_kept - retained_shown ))"
+    echo "  kept by the merged mask:   ${retained_shown}"
+    echo "Merged mask used above:      ${CLEAR_SKY_MASK_FILE}"
+    echo "Screen output directory:     ${NR_SST_DIRECTION_FILTER_DIR}"
+else
+    echo "NR SST direction screen:     off"
+fi
 echo "Observation input row count: ${obs_rows_shown}"
 echo "Merged Hx row x col count:   ${merged_shape_shown}"
 if [[ "${OptimizWeight}" == "1" ]]; then
