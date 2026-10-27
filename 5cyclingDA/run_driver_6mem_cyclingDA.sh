@@ -49,9 +49,7 @@ export filter_kind=2         #1=EAKF,2=QCF_RHF
 export rttov_scatt=0         #0= simple cloud , 1 = rttov-scatt
 export obs_err_std=0.25       #controls sigma_y
 
-export update_ocean=1  #0 = no update ocean
-export run_ocean=1     #1= run wrf with ocean
-
+# update_ocean / run_ocean are set per experiment group in the loop below.
 run_wrf_flag=1
 run_da_flag=1
 
@@ -82,6 +80,28 @@ cycling_std_ts=$(date +%s -d "2018-09-10 00:00:00" 2>/dev/null)   #standard begi
 start_ts=$(date +%s -d "$START_TIME_STR" 2>/dev/null)
 end_ts=$(date +%s -d "$END_TIME_STR" 2>/dev/null)
 
+#==========================================================
+#run the selected experiment groups sequentially
+#  1 = update atmosphere, no ocean update, no ocean model
+#  2 = update atmosphere, no ocean update, run ocean model
+#  3 = update atmosphere + ocean, run ocean model
+#Override on submission with e.g. RUN_GROUPS=1,3
+#==========================================================
+RUN_GROUPS=${RUN_GROUPS:-1,2,3}
+
+for group_id in $(echo "$RUN_GROUPS" | tr ',' ' '); do
+  case "$group_id" in
+    1) export update_ocean=0; export run_ocean=0 ;;
+    2) export update_ocean=0; export run_ocean=1 ;;
+    3) export update_ocean=1; export run_ocean=1 ;;
+    *) echo "Unknown group: $group_id"; exit 1 ;;
+  esac
+
+  echo "=================================================="
+  echo "Running group ${group_id}: oceanAssim${update_ocean}Run${run_ocean}"
+  echo "=================================================="
+
+# The existing DA/WRF body below runs once per selected group.
 if [ "$run_da_flag" -eq 1 ];then
   #---------------------------------------
   #             first do DA              -
@@ -271,9 +291,12 @@ if [ "$run_wrf_flag" -eq 1 ];then
     
   elif [ "$filter_kind" -eq 2 ];then
     export cycle_wrfout_dir=${scratch_dir}/cycle_test/6mem_oceanAssim${update_ocean}Run${run_ocean}/QCF_RHF
-    
+
   fi
   mkdir -p ${cycle_wrfout_dir}
+
+  # Array job name for this group; reused by the bkill -r cleanup below.
+  wrf_job_name="wrf_cyc_${current_time}"
 
   for attempt_num in $(seq 1 $MAX_ATTEMPTS); do
     pending_indices=""
@@ -348,7 +371,7 @@ if [ "$run_wrf_flag" -eq 1 ];then
     echo "Attempt #$attempt_num: Submitting WRF Job Array for $pending_count members: [${pending_indices}]"
     cd ${base_dir}/5cyclingDA
     
-    bsub -J "wrf_cyc_${current_time}_[${pending_indices}]" < ${base_dir}/0necessay_files/sub_wrf_array.sh
+    bsub -J "${wrf_job_name}_[${pending_indices}]" < ${base_dir}/0necessay_files/sub_wrf_array.sh
     
     # >>> 阶段 3: 集中监控所有运行中的成员 <<<
     echo "Waiting for array jobs to finish..."
@@ -376,8 +399,8 @@ if [ "$run_wrf_flag" -eq 1 ];then
 
       if [ "$elapsed_time" -ge "$max_wait_time" ]; then
         echo "WRF wait time out! Killing hanging jobs..."
-        bkill -J "wrf_cyc" 2>/dev/null
-        break 
+        bkill -r -J "${wrf_job_name}*" 2>/dev/null || true
+        break
       fi
 
       sleep 30
@@ -431,6 +454,17 @@ if [ "$run_wrf_flag" -eq 1 ];then
 
   echo "All WRF ensemble members completed successfully for cycle ${current_time}."
   echo "--------------------"
+
+  # Remove any residual WRF array elements still known to LSF.
+  bkill -r -J "${wrf_job_name}*" >/dev/null 2>&1 || true
+  for wait_try in $(seq 1 12); do
+    if ! bjobs -J "${wrf_job_name}*" 2>/dev/null | grep -Eq 'RUN|PEND|PSUSP|USUSP'; then
+      break
+    fi
+    sleep 5
+  done
 fi
+
+done
   
 
