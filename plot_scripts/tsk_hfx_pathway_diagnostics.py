@@ -298,9 +298,16 @@ def nr_wrfout_path(config: dict, stamp: str) -> Path:
 
 
 def _validate_time(dataset, path: Path, stamp: str) -> None:
+    """校验 wrfout 文件时间;兼容标量 bytes 与 (DateStrLen,) 二维字符数组两种 Times 布局。"""
     times = dataset.variables["Times"][:]
-    first = times[0]
-    text = first.decode() if isinstance(first, (bytes, np.bytes_)) else str(first)
+    first = np.asarray(times[0])
+    if first.ndim == 0:
+        item = first.item()
+        text = item.decode() if isinstance(item, (bytes, np.bytes_)) else str(item)
+    else:
+        text = "".join(
+            c.decode() if isinstance(c, bytes) else str(c) for c in first.ravel().tolist()
+        ).strip()
     if text != stamp:
         raise ValueError(f"file time mismatch: {path} has {text!r}, expected {stamp!r}")
 
