@@ -12,6 +12,10 @@ surface flux, one selected low-level atmospheric variable, then diagnoses:
 
 Change FLUX_NAME to "QFX" or "HFX" to choose the surface-flux object.
 Change ATM_VARIABLE and ATM_LEVEL to choose the low-level atmospheric response.
+
+The RMSE region defaults to the whole NR/member overlap domain. Set TC_RADIUS_KM
+to a radius in km to restrict the RMSE to the circle around the NR TC center
+(minimum PSFC), following plot_cycle_rmse_times.py.
 """
 
 from __future__ import annotations
@@ -32,13 +36,25 @@ from scipy.interpolate import LinearNDInterpolator
 # =============================================================================
 
 BASE_DIR = Path("/scratch/lililei1/kcfu/tc_mangkhut/cycle_test")
-NR_BASE = Path("/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout")
+NR_BASE = Path("/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/2domain")
 MEMBER_DOMAIN = "d02"
-NR_DOMAIN = "d03"
+NR_DOMAIN = "d02"
 START_TIME = "2018-09-10_00:30:00"
 END_TIME = "2018-09-10_06:00:00"
 STEP_MINUTES = 30
-NR_COARSEN_FACTOR = 5
+NR_COARSEN_FACTOR = 1
+
+# Restrict the RMSE region to a circle of this radius (km) around the NR TC
+# center (minimum CENTER_PRESSURE_VAR). None -> whole overlap domain (default).
+TC_RADIUS_KM: float | None = None
+CENTER_PRESSURE_VAR = "PSFC"
+
+# Optional guard for truncated circles: circle coverage is the fraction of the
+# nominal TC-circle area that falls inside the member grid (1.0 = full circle;
+# ~0.33 = two thirds of the circle reach beyond the domain edge). If set and
+# coverage drops below this threshold the script stops with a diagnostic
+# instead of computing RMSE on a silently truncated region. None -> no guard.
+MIN_REGION_COVERAGE: float | None = None
 
 EXPERIMENTS = ["6mem_oceanAssim0Run0", "6mem_oceanAssim0Run1", "6mem_oceanAssim1Run1"]
 FILTERS = ["EAKF", "QCF_RHF"]
@@ -202,6 +218,64 @@ def read_lat_lon(ds: xr.Dataset, data: xr.DataArray, variable: dict) -> tuple[np
     return lats, lons
 
 
+@lru_cache(maxsize=None)
+def read_nr_tc_center_cached(path_str: str, pressure_var: str) -> tuple[float, float, float]:
+    path = Path(path_str)
+    with xr.open_dataset(path, decode_times=False) as ds:
+        if pressure_var not in ds:
+            raise KeyError(f"{pressure_var} not found in {path}")
+        if "XLAT" not in ds or "XLONG" not in ds:
+            raise KeyError(f"XLAT/XLONG not found in {path}")
+
+        pressure = isel_time0(ds[pressure_var])
+        if pressure.ndim != 2:
+            raise ValueError(f"{pressure_var} should be 2-D after Time selection, got dims={pressure.dims}: {path}")
+
+        pressure_values = pressure.values.astype(float)
+        lats = isel_time0(ds["XLAT"]).values.astype(float)
+        lons = isel_time0(ds["XLONG"]).values.astype(float)
+
+    if pressure_values.shape != lats.shape:
+        raise ValueError(f"{pressure_var} shape {pressure_values.shape} does not match XLAT shape {lats.shape}: {path}")
+
+    center_idx = np.unravel_index(np.nanargmin(pressure_values), pressure_values.shape)
+    return float(lats[center_idx]), float(lons[center_idx]), float(pressure_values[center_idx])
+
+
+def read_nr_tc_center(path: Path) -> tuple[float, float, float]:
+    return read_nr_tc_center_cached(str(path), CENTER_PRESSURE_VAR)
+
+
+def latlon_distance_km(lats: np.ndarray, lons: np.ndarray, center_lat: float, center_lon: float) -> np.ndarray:
+    earth_radius_km = 6371.0
+    lat1 = np.deg2rad(lats)
+    lon1 = np.deg2rad(lons)
+    lat2 = np.deg2rad(center_lat)
+    lon2 = np.deg2rad(center_lon)
+    dlat = lat1 - lat2
+    dlon = lon1 - lon2
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
+    return 2.0 * earth_radius_km * np.arcsin(np.sqrt(a))
+
+
+def tc_region_mask(lats: np.ndarray, lons: np.ndarray, center_lat: float, center_lon: float) -> np.ndarray:
+    if TC_RADIUS_KM is None:
+        return np.ones_like(lats, dtype=bool)
+    return latlon_distance_km(lats, lons, center_lat, center_lon) <= TC_RADIUS_KM
+
+
+def expected_circle_points(lats: np.ndarray, lons: np.ndarray, center_lat: float, radius_km: float) -> float:
+    """Expected grid-point count of a full circle, estimated from local grid spacing."""
+    if lats.shape[0] < 2 or lats.shape[1] < 2:
+        return float("nan")
+    dlat_km = abs(float(np.nanmedian(np.diff(lats[:, 0])))) * 111.19
+    dlon_km = abs(float(np.nanmedian(np.diff(lons[0, :])))) * 111.32 * np.cos(np.deg2rad(center_lat))
+    cell_km2 = dlat_km * dlon_km
+    if cell_km2 <= 0:
+        return float("nan")
+    return float(np.pi * radius_km**2 / cell_km2)
+
+
 def read_variable_2d(ds: xr.Dataset, variable: dict) -> xr.DataArray:
     name = variable["name"]
     vertical_level = variable["vertical_level"]
@@ -346,27 +420,60 @@ def nanmean_no_warning(stack: np.ndarray) -> np.ndarray:
     return out
 
 
-def rmse_for_variable(exp: str, filt: str, t: datetime, variable: dict, nr_file: Path) -> dict:
+def rmse_for_variable(
+    exp: str,
+    filt: str,
+    t: datetime,
+    variable: dict,
+    nr_file: Path,
+    center_lat: float,
+    center_lon: float,
+) -> dict:
     member_rmses = []
     member_fields = []
     nr_fields = []
     overlap_points = []
     overlap_fraction = []
+    region_coverages = []
+    circle_coverages = []
 
     for mem in MEMBERS:
         member_file = find_member_file(BASE_DIR, exp, filt, mem, t)
         ens_lats, ens_lons, ens_values = read_field_and_grid(member_file, variable)
         nr_on_ens = interp_nr_to_member_grid(nr_file, ens_lats, ens_lons, variable)
-        mask = np.isfinite(nr_on_ens) & np.isfinite(ens_values)
+        region_mask = tc_region_mask(ens_lats, ens_lons, center_lat, center_lon)
+        mask = (np.isfinite(nr_on_ens) & np.isfinite(ens_values)) & region_mask
         n_overlap = int(mask.sum())
+        n_region = int(region_mask.sum())
         if n_overlap == 0:
-            raise ValueError(f"No NR/member overlap after interpolation: NR={nr_file}, member={member_file}")
+            raise ValueError(
+                "No NR/member overlap after interpolation and region mask: "
+                f"NR={nr_file}, member={member_file}, "
+                f"center=({center_lat:.3f}, {center_lon:.3f}), radius_km={TC_RADIUS_KM}"
+            )
+        region_coverage = float(n_overlap / n_region)
+        if TC_RADIUS_KM is None:
+            circle_coverage = 1.0
+        else:
+            n_expected = expected_circle_points(ens_lats, ens_lons, center_lat, TC_RADIUS_KM)
+            circle_coverage = float(n_region / n_expected) if np.isfinite(n_expected) and n_expected > 0 else float("nan")
+        if MIN_REGION_COVERAGE is not None and (
+            not np.isfinite(circle_coverage) or circle_coverage < MIN_REGION_COVERAGE
+        ):
+            raise ValueError(
+                f"TC region truncated: only {circle_coverage:.1%} of the "
+                f"TC_RADIUS_KM={TC_RADIUS_KM} circle falls inside the member grid "
+                f"(threshold {MIN_REGION_COVERAGE:.1%}): member={member_file}, "
+                f"center=({center_lat:.3f}, {center_lon:.3f})"
+            )
 
         member_rmses.append(spatial_rmse(ens_values, nr_on_ens, mask))
         member_fields.append(np.where(mask, ens_values, np.nan))
         nr_fields.append(np.where(mask, nr_on_ens, np.nan))
         overlap_points.append(n_overlap)
         overlap_fraction.append(float(n_overlap / mask.size))
+        region_coverages.append(region_coverage)
+        circle_coverages.append(circle_coverage)
 
     ens_mean_field = nanmean_no_warning(np.stack(member_fields, axis=0))
     nr_mean_field = nanmean_no_warning(np.stack(nr_fields, axis=0))
@@ -378,11 +485,17 @@ def rmse_for_variable(exp: str, filt: str, t: datetime, variable: dict, nr_file:
         "ensemble_mean_rmse": spatial_rmse(ens_mean_field, nr_mean_field, mean_mask),
         "mean_overlap_points": float(np.nanmean(overlap_points)),
         "mean_overlap_fraction": float(np.nanmean(overlap_fraction)),
+        "mean_region_coverage": float(np.nanmean(region_coverages)),
+        "mean_circle_coverage": float(np.nanmean(circle_coverages)),
     }
 
 
 def calculate_rmse_timeseries(times: list[datetime], flux_variable: dict, atm_variable: dict) -> pd.DataFrame:
     nr_file_by_time = {wrf_time_name(t): find_nr_file(NR_BASE, t) for t in times}
+    nr_center_by_time = {
+        wrf_time_name(t): read_nr_tc_center(nr_file_by_time[wrf_time_name(t)])
+        for t in times
+    }
     records = []
 
     for exp in EXPERIMENTS:
@@ -391,14 +504,20 @@ def calculate_rmse_timeseries(times: list[datetime], flux_variable: dict, atm_va
             for t in times:
                 time_name = wrf_time_name(t)
                 nr_file = nr_file_by_time[time_name]
-                flux_rmse = rmse_for_variable(exp, filt, t, flux_variable, nr_file)
-                atm_rmse = rmse_for_variable(exp, filt, t, atm_variable, nr_file)
+                center_lat, center_lon, center_pressure = nr_center_by_time[time_name]
+                flux_rmse = rmse_for_variable(exp, filt, t, flux_variable, nr_file, center_lat, center_lon)
+                atm_rmse = rmse_for_variable(exp, filt, t, atm_variable, nr_file, center_lat, center_lon)
 
                 records.append(
                     {
                         "time": time_name,
                         "experiment": exp,
                         "filter": filt,
+                        "tc_radius_km": TC_RADIUS_KM,
+                        "center_pressure_var": CENTER_PRESSURE_VAR,
+                        "center_lat": center_lat,
+                        "center_lon": center_lon,
+                        "center_pressure": center_pressure,
                         "flux_name": flux_variable["label"],
                         "atm_name": atm_variable["label"],
                         "flux_mean_member_rmse": flux_rmse["mean_member_rmse"],
@@ -409,6 +528,10 @@ def calculate_rmse_timeseries(times: list[datetime], flux_variable: dict, atm_va
                         "atm_ensemble_mean_rmse": atm_rmse["ensemble_mean_rmse"],
                         "flux_mean_overlap_fraction": flux_rmse["mean_overlap_fraction"],
                         "atm_mean_overlap_fraction": atm_rmse["mean_overlap_fraction"],
+                        "flux_mean_region_coverage": flux_rmse["mean_region_coverage"],
+                        "atm_mean_region_coverage": atm_rmse["mean_region_coverage"],
+                        "flux_mean_circle_coverage": flux_rmse["mean_circle_coverage"],
+                        "atm_mean_circle_coverage": atm_rmse["mean_circle_coverage"],
                     }
                 )
 
@@ -493,7 +616,8 @@ def plot_rmse_timeseries(df: pd.DataFrame, flux_variable: dict, atm_variable: di
     axes[0].set_ylabel(f"{flux_variable['label']} RMSE\n({flux_variable['unit']})")
     axes[1].set_ylabel(f"{atm_variable['label']} RMSE\n({atm_variable['unit']})")
     axes[1].set_xlabel("Forecast time")
-    axes[0].set_title(f"Flux error and low-level atmospheric error ({RMSE_METRIC})")
+    region_note = "whole domain" if TC_RADIUS_KM is None else f"TC {TC_RADIUS_KM:g} km"
+    axes[0].set_title(f"Flux error and low-level atmospheric error ({RMSE_METRIC}, {region_note})")
     for ax in axes:
         ax.grid(True, linestyle=":", linewidth=0.8, alpha=0.7)
     axes[0].legend(loc="best", frameon=False, fontsize=8, handlelength=4.0)
@@ -596,6 +720,12 @@ def write_summary(lag_df: pd.DataFrame, out_dir: Path) -> None:
     lines.append(f"Flux target: {FLUX_NAME}")
     lines.append(f"Atmospheric target: {ATM_VARIABLE} level {ATM_LEVEL}")
     lines.append(f"RMSE metric: {RMSE_METRIC}")
+    if TC_RADIUS_KM is None:
+        lines.append("RMSE region: whole NR/member overlap domain")
+    else:
+        lines.append(f"RMSE region: circle of {TC_RADIUS_KM:g} km around NR {CENTER_PRESSURE_VAR} minimum")
+    if TC_RADIUS_KM is not None and MIN_REGION_COVERAGE is not None:
+        lines.append(f"Minimum required circle coverage: {MIN_REGION_COVERAGE:.1%}")
     lines.append("")
     lines.append("Interpretation guide:")
     lines.append("  corr flux(t), atm(t+lag) > 0 means larger flux error tends to accompany larger later atmospheric error.")
@@ -621,7 +751,8 @@ def main() -> None:
         raise ValueError(f"FLUX_NAME must be one of {sorted(FLUX_CONFIGS)}")
     flux_variable = FLUX_CONFIGS[FLUX_NAME]
     atm_variable = ATM_CONFIG
-    out_dir = OUT_DIR / f"{FLUX_NAME.lower()}_to_{ATM_VARIABLE.lower()}_lev{ATM_LEVEL}"
+    region_tag = "domain" if TC_RADIUS_KM is None else f"tc_r{TC_RADIUS_KM:g}km"
+    out_dir = OUT_DIR / f"{FLUX_NAME.lower()}_to_{ATM_VARIABLE.lower()}_lev{ATM_LEVEL}_{region_tag}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     times = build_times(START_TIME, END_TIME, STEP_MINUTES)
