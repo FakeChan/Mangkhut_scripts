@@ -92,6 +92,21 @@ def tables_dir() -> Path:
     return output_root() / "tables"
 
 
+def _read_table(path: Path) -> pd.DataFrame | None:
+    """失败批次可能只有空 CSV;保留上游排错提示,不把它当成可绘图数据。"""
+    if not path.exists():
+        return None
+    try:
+        table = pd.read_csv(path, dtype={"member": str})
+    except pd.errors.EmptyDataError:
+        table = pd.DataFrame()
+    if table.empty:
+        print(f"[plot] SKIP empty table: {path}; check tables/case_manifest.csv "
+              "and task2 extraction logs", flush=True)
+        return None
+    return table
+
+
 def figures_dir() -> Path:
     path = output_root() / "figures"
     path.mkdir(parents=True, exist_ok=True)
@@ -263,6 +278,9 @@ def plot_main_spatial() -> list[str]:
     produced = []
     hours = PLOT_CONFIG["main_hours"]
     fields = _collect_mean_fields(MAIN_COLUMNS, hours, PLOT_CONFIG["methods"])
+    if not fields:
+        print("[plot] SKIP main spatial maps: no case cache; check tables/case_manifest.csv", flush=True)
+        return produced
     scales = {}
     for column in MAIN_COLUMNS:
         panels = [v["mean"] for (c, _, _), v in fields.items() if c == column]
@@ -335,6 +353,9 @@ def plot_signed_errors() -> list[str]:
     produced = []
     hours = PLOT_CONFIG["main_hours"]
     fields = _collect_mean_fields(SIGNED_COLUMNS, hours, PLOT_CONFIG["methods"])
+    if not fields:
+        print("[plot] SKIP signed error maps: no case cache; check tables/case_manifest.csv", flush=True)
+        return produced
     for method in PLOT_CONFIG["methods"]:
         stem = f"task2_signed_errors_{method}"
         fig, axes = plt.subplots(len(hours), len(SIGNED_COLUMNS),
@@ -386,9 +407,9 @@ def plot_member_distribution() -> list[str]:
     """成员差异图:逐成员 ΔMSE_H / ΔMSE_TSK 柱状(0.5–2 h 平均)并标注正文案例成员。"""
     produced = []
     metrics_path = tables_dir() / "member_metrics.csv"
-    if not metrics_path.exists():
+    metrics = _read_table(metrics_path)
+    if metrics is None:
         return produced
-    metrics = pd.read_csv(metrics_path)
     sub = metrics[(metrics["mask_kind"] == "ocean_common") & (metrics["region"] == "all")
                   & (metrics["lead_hour"] >= 0.5) & (metrics["lead_hour"] <= 2.0)]
     if sub.empty:
@@ -396,21 +417,19 @@ def plot_member_distribution() -> list[str]:
     ranking = tp.member_dse_h_ranking(metrics)
     stem = "task2_member_distribution"
     fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.2), facecolor="white")
-    width = 0.35
+    width = 0.7
     for ax, var, unit in ((axes[0], "hfx_delta_mse", "(W m$^{-2}$)$^2$"),
                           (axes[1], "tsk_delta_mse", "K$^2$")):
         positions = np.arange(len(PLOT_CONFIG["methods"]) * len(tp.CONFIG["members"]), dtype=float)
-        pos = 0
+        n_members = len(tp.CONFIG["members"])
         for mi, method in enumerate(PLOT_CONFIG["methods"]):
-            for oi, offset in enumerate((-width / 2, width / 2)):
-                values = []
-                for member in tp.CONFIG["members"]:
-                    hit = sub[(sub["method"] == method) & (sub["member"] == member)]
-                    values.append(float(hit[var].mean()) if len(hit) else np.nan)
-                ax.bar(positions[pos] + offset, values, width=width,
-                       color="#0072B2" if oi == 0 else "#D55E00",
-                       label=f"{method}" if pos < 2 else None)
-                pos += 1
+            values = []
+            for member in tp.CONFIG["members"]:
+                hit = sub[(sub["method"] == method) & (sub["member"] == member)]
+                values.append(float(hit[var].mean()) if len(hit) else np.nan)
+            method_positions = positions[mi * n_members:(mi + 1) * n_members]
+            ax.bar(method_positions, values, width=width,
+                   color="#0072B2" if mi == 0 else "#D55E00", label=method)
         ax.set_xticks(positions)
         ax.set_xticklabels([f"{m}\n{mem}" for m in PLOT_CONFIG["methods"]
                             for mem in tp.CONFIG["members"]], fontsize=8)
@@ -445,9 +464,10 @@ def plot_case_members() -> list[str]:
     """正文案例成员图:两名成员的 δH 与 C(4 主时次 × 2 成员)。"""
     produced = []
     metrics_path = tables_dir() / "member_metrics.csv"
-    if not metrics_path.exists():
+    metrics = _read_table(metrics_path)
+    if metrics is None:
         return produced
-    ranking = tp.member_dse_h_ranking(pd.read_csv(metrics_path))
+    ranking = tp.member_dse_h_ranking(metrics)
     members = [m for m in (ranking.get("strongest_member"), ranking.get("weakest_member")) if m]
     if not members:
         return produced
@@ -653,9 +673,9 @@ def plot_storm_maps() -> list[str]:
 
 def plot_radial_profiles() -> list[str]:
     radial_path = tables_dir() / "radial_profiles.csv"
-    if not radial_path.exists():
+    radial = _read_table(radial_path)
+    if radial is None:
         return []
-    radial = pd.read_csv(radial_path)
     radial = radial[radial["lead_hour"] <= 2.0]
     if radial.empty:
         return []
@@ -695,9 +715,9 @@ def plot_radial_profiles() -> list[str]:
 
 def plot_storm_bars() -> list[str]:
     metrics_path = tables_dir() / "storm_relative_metrics.csv"
-    if not metrics_path.exists():
+    metrics = _read_table(metrics_path)
+    if metrics is None:
         return []
-    metrics = pd.read_csv(metrics_path)
     sub = metrics[metrics["lead_hour"] <= 2.0]
     if sub.empty:
         return []

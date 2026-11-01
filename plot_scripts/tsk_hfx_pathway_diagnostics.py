@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import sys
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -496,8 +497,9 @@ def extract_case(config: dict, method: str, member: str, lead_hour: float) -> xr
 
     party_inputs: dict[str, dict] = {}
     for tag, path in (("w", weak_file), ("s", strong_file)):
-        xs_u = slice(xs.start, min(xs.stop + 1, lon_w.shape[1]))
-        ys_v = slice(ys.start, min(ys.stop + 1, lat_w.shape[0]))
+        # U/V 各比质量点多一个边界点;子窗碰到域边界时也必须保留它。
+        xs_u = slice(xs.start, xs.stop + 1)
+        ys_v = slice(ys.start, ys.stop + 1)
         with Dataset(path, "r") as d:
             raw = _read_member_state(d, ys, xs, ys_v, xs_u)
         derived = derive_party_fields(raw, config)
@@ -537,8 +539,10 @@ def extract_case(config: dict, method: str, member: str, lead_hour: float) -> xr
     }
 
     coords = {"y": np.arange(lat.shape[0]), "x": np.arange(lat.shape[1])}
+    interface_fields = {"ph_w", "ph_s", "phb_w", "phb_s"}
     case = xr.Dataset(
-        {name: (("y", "x"), values) for name, values in data.items()},
+        {name: (("bottom_top_stag", "y", "x") if name in interface_fields else ("y", "x"), values)
+         for name, values in data.items()},
         coords={**coords, "lat": (("y", "x"), lat), "lon": (("y", "x"), lon)},
     )
     case.attrs["meta_json"] = json.dumps(meta, default=str)
@@ -777,7 +781,7 @@ def _recon_inputs(case: xr.Dataset, tag: str, config: dict) -> dict:
            else initial_momentum_roughness(ustar, config["isftcflx"]))
     return {
         "air_temperature_k": field(case, f"t_air_{tag}"),
-        "vapor_mixing_ratio": field(case, f"qv_{tag}"),
+        "vapor_mixing_ratio": field(case, f"qvapor_{tag}"),
         "air_pressure_pa": field(case, f"p_air_{tag}"),
         "surface_pressure_pa": field(case, f"psfc_{tag}"),
         "height_agl_m": field(case, f"z_agl_{tag}"),
@@ -1400,6 +1404,9 @@ def run_task2(config: dict = CONFIG) -> Path:
                 except Exception as error:  # 缺文件/坏文件逐条登记,不静默丢弃
                     manifest_rows.append({"case_id": cid, "task": "task2",
                                           "status": f"extract_failed: {type(error).__name__}: {error}"})
+                    print(f"[task2] {cid} FAILED: {type(error).__name__}: {error}",
+                          file=sys.stderr, flush=True)
+                    traceback.print_exc()
                     continue
                 cache_path = cache_dir / f"case_{cid}.nc"
                 save_case_cache(case, cache_path)
@@ -1441,7 +1448,14 @@ def run_task2(config: dict = CONFIG) -> Path:
     baseline = baseline_reproduction_table(member_metrics, config)
     baseline.to_csv(dirs["tables"] / "baseline_reproduction.csv", index=False)
     write_json(config_snapshot(config), dirs["tables"] / "config_snapshot.json")
-    print(f"[task2] done -> {dirs['tables']}", flush=True)
+    succeeded = sum(row["status"] == "ok" for row in manifest_rows)
+    failed = len(manifest_rows) - succeeded
+    if succeeded == 0:
+        raise RuntimeError(
+            f"[task2] no case extracted successfully ({failed} failed); "
+            f"see {dirs['tables'] / 'case_manifest.csv'} and the extraction tracebacks"
+        )
+    print(f"[task2] done: {succeeded} succeeded, {failed} failed -> {dirs['tables']}", flush=True)
     return root
 
 
@@ -1509,6 +1523,9 @@ def run_task3(config: dict = CONFIG) -> Path:
                 except Exception as error:
                     manifest_rows.append({"case_id": cid, "task": "task3",
                                           "status": f"recon_failed: {type(error).__name__}: {error}"})
+                    print(f"[task3] {cid} FAILED: {type(error).__name__}: {error}",
+                          file=sys.stderr, flush=True)
+                    traceback.print_exc()
                     continue
                 save_recon_cache(recon, dirs["cache"] / "recon" / f"recon_{cid}.nc")
                 manifest_rows.append({"case_id": cid, "task": "task3", "status": "ok",
