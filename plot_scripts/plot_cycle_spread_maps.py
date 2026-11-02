@@ -9,6 +9,7 @@ spread(y,x) = sqrt(sum_m((X_m(y,x) - mean_m(X_m(y,x)))**2) / (N-1))
 先逐格点沿集合维计算标准差，保留整个 d02 二维场（包含陆地和边界）。
 不对每个成员先做空间平均，不拼接成员网格，不使用台风半径裁剪。
 某格点必须具有全部成员的有效值，否则该点为 NaN；缺成员文件直接报错。
+无耦合试验不运行海洋模式，OM_TMP 对应两行保留并标为 N/A，不填成零离散度。
 额外输出全域 RMS spread = sqrt(mean_yx(spread**2))，仅对有效格点等权平均。
 
 支持 wrfout 中原始二维变量或原始三维变量的某个模式层；vertical_level
@@ -37,7 +38,8 @@ CONFIG = {
     "groups": (
         {"label": "Strong coupling", "directory": "6mem_oceanAssim1Run1"},  # 强耦合
         {"label": "Weak coupling", "directory": "6mem_oceanAssim0Run1"},    # 弱耦合
-        {"label": "Uncoupled", "directory": "6mem_oceanAssim0Run0"},       # 无耦合
+        {"label": "Uncoupled", "directory": "6mem_oceanAssim0Run0",
+         "unavailable_variables": ("OM_TMP",)},  # 不运行海洋模式；此变量两行显示 N/A
     ),
     "filters": ("EAKF", "QCF_RHF"),
     "members": ("006", "015", "029", "037", "043", "044"),
@@ -117,6 +119,11 @@ def _without_time(arr: xr.DataArray, index: int) -> xr.DataArray:
 def read_member_field(path: Path, time: datetime, config: dict):
     """只读取指定层，返回 field、lat、lon、原始单位；检查水平维度。"""
     with xr.open_dataset(path, decode_times=False) as ds:
+        if config["variable"] not in ds:
+            ocean_variables = [name for name in ds.data_vars if name.startswith("OM_")]
+            raise KeyError(f"Variable {config['variable']!r} not found in file: {path}. "
+                           f"Available OM_ variables: {ocean_variables}. "
+                           "Check the variable name and the experiment's ocean output.")
         index = _time_index(ds, time, path)
         arr = _without_time(ds[config["variable"]], index)
         yd = next((d for d in arr.dims if d in ("south_north", "south_north_stag")), None)
@@ -169,8 +176,16 @@ def calculate(config: dict) -> xr.Dataset:
     if not np.isfinite(config["scale"]) or config["scale"] <= 0:
         raise ValueError("scale must be finite and positive")
     rows = [(group, method) for group in config["groups"] for method in config["filters"]]
-    records, source_files, units = [], [], set()
+    records, source_files, statuses, reasons, units = [], [], [], [], set()
     for group, method in rows:
+        if config["variable"] in group.get("unavailable_variables", ()):
+            reason = f"{config['variable']} unavailable: ocean model not run"
+            records.append([None] * len(times))
+            source_files.append([[""] * len(members) for _ in times])
+            statuses.append(["not_applicable"] * len(times))
+            reasons.append([reason] * len(times))
+            print(f"N/A: {group['label']} / {method}: {reason}")
+            continue
         row_records, row_files = [], []
         for time in times:
             fields, paths = [], []
@@ -196,16 +211,28 @@ def calculate(config: dict) -> xr.Dataset:
                   f"N={len(fields)}, valid grid points={np.isfinite(spread).sum()}/{spread.size}")
         records.append(row_records)
         source_files.append(row_files)
+        statuses.append(["ok"] * len(times))
+        reasons.append([""] * len(times))
+    if not units:
+        raise ValueError(f"No applicable experiments for {config['variable']}")
     if len(units) != 1:
         raise ValueError(f"Inconsistent input units across members/experiments: {units}")
     # 同一变量在各试验/时次的 d02 水平形状应一致；经纬度随时次可变化。
-    shapes = {record[0].shape for row in records for record in row}
+    shapes = {record[0].shape for row in records for record in row if record is not None}
     if len(shapes) != 1:
         raise ValueError(f"Different d02 grid shapes across panels: {shapes}")
     dims = ("row", "time", "y", "x")
-    variables = {name: (dims, np.stack([[r[k] for r in row] for row in records]))
+    shape = next(iter(shapes))
+    empty = (np.full(shape, np.nan), np.zeros(shape, dtype=np.int16),
+             np.full(shape, np.nan), np.full(shape, np.nan))
+    variables = {name: (dims, np.stack([[(r if r is not None else empty)[k]
+                                       for r in row] for row in records]))
                  for k, name in enumerate(("spread", "valid_member_count", "latitude", "longitude"))}
     variables["source_file"] = (("row", "time", "member"), np.asarray(source_files))
+    variables["panel_status"] = (("row", "time"), np.asarray(statuses))
+    variables["panel_reason"] = (("row", "time"), np.asarray(reasons))
+    variables["members_used"] = (("row", "time"),
+                                  np.where(np.asarray(statuses) == "ok", len(members), 0))
     ds = xr.Dataset(variables, coords={
         "row": np.arange(len(rows)), "time": np.array(times, dtype="datetime64[ns]"),
         "member": list(members),
@@ -227,7 +254,8 @@ def calculate(config: dict) -> xr.Dataset:
     ds.attrs = {"variable": config["variable"], "domain": config["domain"],
                 "vertical_level": config["vertical_level"], "time_zone": "UTC",
                 "spatial_support": "Whole d02 including land and boundary points; no cropping",
-                "missing_policy": "All members required at each point; otherwise spread is NaN",
+                "missing_policy": "All members required at each point; otherwise spread is NaN. "
+                                  "Configured unavailable variables are N/A, with members_used=0.",
                 "scale": config["scale"]}
     return ds
 
@@ -255,6 +283,9 @@ def plot_spread(ds: xr.Dataset, config: dict):
             ax = axes[i, j]
             image = ax.imshow(ds.spread.values[i, j], origin="lower", aspect="equal",
                               interpolation="nearest", cmap=cmap, norm=norm)
+            if "panel_status" in ds and ds.panel_status.values[i, j] == "not_applicable":
+                ax.text(0.5, 0.5, f"N/A\n{config['variable']} unavailable\nOcean model not run",
+                        transform=ax.transAxes, ha="center", va="center", fontsize=9)
             if i == 0:
                 stamp = ds.time.values[j].astype("datetime64[s]").astype(datetime)
                 ax.set_title(stamp.strftime("%m-%d\n%H:%M UTC"), fontsize=10)
@@ -270,7 +301,7 @@ def plot_spread(ds: xr.Dataset, config: dict):
     level = f"; 3-D variables use model level {config['vertical_level']} (0-based)"
     fig.suptitle(f"{config['variable']} | {config['domain']} full-domain ensemble spread | "
                  f"N = {ds.sizes['member']}, ddof = 1\n"
-                 f"{config['start_time'][:10]} UTC{level}; gray = missing", fontsize=11)
+                 f"{config['start_time'][:10]} UTC{level}; gray = missing / N/A", fontsize=11)
     return fig, axes
 
 
@@ -284,7 +315,8 @@ def save_outputs(ds: xr.Dataset, config: dict) -> list[Path]:
     stem = f"{config['variable']}_{config['domain']}_lev{config['vertical_level']}_spread_{start}_{end}"
     nc_path, csv_path = output_dir / f"{stem}.nc", output_dir / f"{stem}.csv"
     ds.to_netcdf(nc_path, engine="netcdf4", encoding={"spread": {"zlib": True, "complevel": 4}})
-    summary = ds[["domain_rms_spread", "valid_grid_points"]].to_dataframe().reset_index()
+    summary = ds[["domain_rms_spread", "valid_grid_points", "members_used",
+                  "panel_status", "panel_reason"]].to_dataframe().reset_index()
     summary["ensemble_members"] = ds.sizes["member"]
     summary["total_grid_points"] = ds.sizes["y"] * ds.sizes["x"]
     summary["units"] = ds.spread.attrs["units"]
