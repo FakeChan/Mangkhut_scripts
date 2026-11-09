@@ -6,8 +6,9 @@ linearly interpolates NR to each member grid and computes RMSE over member grid
 points inside both the NR d03 linear-interpolation footprint and a configurable
 radius around the NR TC center.
 
-An additional figure shows the weak- and strong-coupling errors relative to the
-uncoupled EAKF error, (e_n - e_x) / e_n * 100.
+An additional figure shows the relative error of every experiment/filter versus
+the uncoupled EAKF error, (e_n - e_x) / e_n * 100. The uncoupled runs are
+included, so the uncoupled EAKF curve is the zero reference.
 
 All parameters are configured explicitly in this file. No command-line
 arguments are used.
@@ -622,11 +623,12 @@ def plot(df: pd.DataFrame, variable: dict) -> None:
 
 
 def relative_difference_table(df: pd.DataFrame, variable: dict) -> pd.DataFrame:
-    """Return (e_n - e_x) / e_n * 100 for weak/strong coupling vs uncoupled EAKF.
+    """Return (e_n - e_x) / e_n * 100 for every experiment vs uncoupled EAKF.
 
     e_n is the uncoupled REFERENCE_FILTER error at the same time and is used for
-    every filter; e_x is the weak or strong coupled error. A negative value
-    means the coupled error is larger.
+    every filter; e_x is the experiment error. The uncoupled rows are included,
+    so the uncoupled EAKF curve is exactly zero. A negative value means the
+    experiment error is larger.
     """
     metric = rmse_column(variable)
     base = df.loc[
@@ -640,9 +642,8 @@ def relative_difference_table(df: pd.DataFrame, variable: dict) -> pd.DataFrame:
             f"{UNCOUPLED_EXPERIMENT!r} / {REFERENCE_FILTER!r}."
         )
 
-    experiments = [e for e in variable["experiments"] if e != UNCOUPLED_EXPERIMENT]
     other = df.loc[
-        df["experiment"].isin(experiments),
+        df["experiment"].isin(variable["experiments"]),
         ["time", "filter", "experiment", metric],
     ].rename(columns={metric: "experiment_error"})
     table = other.merge(base, on="time", how="left")
@@ -657,7 +658,7 @@ def relative_difference_table(df: pd.DataFrame, variable: dict) -> pd.DataFrame:
 
 
 def plot_relative_difference(df: pd.DataFrame, variable: dict) -> Path | None:
-    """Plot weak/strong error differences relative to the uncoupled EAKF run."""
+    """Plot every experiment's error difference relative to the uncoupled EAKF run."""
     if UNCOUPLED_EXPERIMENT not in variable["experiments"]:
         print(
             f"Skipping relative-difference figure: {UNCOUPLED_EXPERIMENT!r} "
@@ -674,8 +675,6 @@ def plot_relative_difference(df: pd.DataFrame, variable: dict) -> Path | None:
     table = relative_difference_table(df, variable)
     fig, ax = plt.subplots(figsize=(8.2, 4.6))
     for exp in variable["experiments"]:
-        if exp == UNCOUPLED_EXPERIMENT:
-            continue
         for filt in FILTERS:
             sub = table[
                 (table["experiment"] == exp) & (table["filter"] == filt)
