@@ -7,7 +7,7 @@ points inside both the NR d03 linear-interpolation footprint and a configurable
 radius around the NR TC center.
 
 An additional figure shows the weak- and strong-coupling errors relative to the
-uncoupled error, (e_n - e_x) / e_n * 100.
+uncoupled EAKF error, (e_n - e_x) / e_n * 100.
 
 All parameters are configured explicitly in this file. No command-line
 arguments are used.
@@ -23,6 +23,7 @@ from pathlib import Path
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -43,7 +44,9 @@ CENTER_PRESSURE_VAR = "PSFC"
 EXPERIMENTS = ["6mem_oceanAssim0Run0", "6mem_oceanAssim0Run1", "6mem_oceanAssim1Run1"]
 # 0Run0 = no ocean assimilation and no ocean model: the uncoupled baseline e_n.
 UNCOUPLED_EXPERIMENT = "6mem_oceanAssim0Run0"
-FILTERS = ["QCF_RHF"]
+# Single reference for every filter: the uncoupled run using this filter.
+REFERENCE_FILTER = "EAKF"
+FILTERS = ["QCF_RHF", "EAKF"]
 MEMBERS = ["006", "015", "029", "037", "043", "044"]
 FLUX_SUM_VARIABLES = {"QFX", "QHX", "HFX", "LH", "LHFLX", "LHFX"}
 
@@ -619,22 +622,30 @@ def plot(df: pd.DataFrame, variable: dict) -> None:
 
 
 def relative_difference_table(df: pd.DataFrame, variable: dict) -> pd.DataFrame:
-    """Return (e_n - e_x) / e_n * 100 for weak/strong coupling versus uncoupled.
+    """Return (e_n - e_x) / e_n * 100 for weak/strong coupling vs uncoupled EAKF.
 
-    e_n is the uncoupled error at the same time and filter; e_x is the weak or
-    strong coupled error. A negative value means the coupled error is larger.
+    e_n is the uncoupled REFERENCE_FILTER error at the same time and is used for
+    every filter; e_x is the weak or strong coupled error. A negative value
+    means the coupled error is larger.
     """
     metric = rmse_column(variable)
     base = df.loc[
-        df["experiment"] == UNCOUPLED_EXPERIMENT, ["time", "filter", metric]
+        (df["experiment"] == UNCOUPLED_EXPERIMENT)
+        & (df["filter"] == REFERENCE_FILTER),
+        ["time", metric],
     ].rename(columns={metric: "uncoupled_error"})
+    if base.empty:
+        raise ValueError(
+            f"Relative-difference reference requires rows for "
+            f"{UNCOUPLED_EXPERIMENT!r} / {REFERENCE_FILTER!r}."
+        )
 
     experiments = [e for e in variable["experiments"] if e != UNCOUPLED_EXPERIMENT]
     other = df.loc[
         df["experiment"].isin(experiments),
         ["time", "filter", "experiment", metric],
     ].rename(columns={metric: "experiment_error"})
-    table = other.merge(base, on=["time", "filter"], how="left")
+    table = other.merge(base, on="time", how="left")
 
     e_n = table["uncoupled_error"].to_numpy(dtype=float)
     e_x = table["experiment_error"].to_numpy(dtype=float)
@@ -646,11 +657,17 @@ def relative_difference_table(df: pd.DataFrame, variable: dict) -> pd.DataFrame:
 
 
 def plot_relative_difference(df: pd.DataFrame, variable: dict) -> Path | None:
-    """Plot weak/strong error differences relative to the uncoupled run."""
+    """Plot weak/strong error differences relative to the uncoupled EAKF run."""
     if UNCOUPLED_EXPERIMENT not in variable["experiments"]:
         print(
             f"Skipping relative-difference figure: {UNCOUPLED_EXPERIMENT!r} "
             "is not in variable['experiments']."
+        )
+        return None
+    if REFERENCE_FILTER not in FILTERS:
+        print(
+            f"Skipping relative-difference figure: reference filter "
+            f"{REFERENCE_FILTER!r} is not in FILTERS."
         )
         return None
 
@@ -681,20 +698,11 @@ def plot_relative_difference(df: pd.DataFrame, variable: dict) -> Path | None:
 
     ax.axhline(0.0, color="0.35", linewidth=1.0, zorder=0)
     ax.set_xlabel("Forecast time")
-    metric_label = (
-        "mean member grid-sum difference"
-        if is_flux_sum_variable(variable)
-        else "mean member RMSE"
-    )
-    if TC_RADIUS_KM is None:
-        region_label = "NR-overlap"
-    else:
-        region_label = f"TC {TC_RADIUS_KM:g} km"
-    ax.set_ylabel(
-        f"{region_label} {metric_label} of {variable_label(variable)} "
-        "relative difference vs uncoupled (%)\n"
-        "negative = experiment error larger than uncoupled"
-    )
+    ylabel = variable_label(variable)
+    if TC_RADIUS_KM is not None:
+        ylabel = f"{ylabel} ({TC_RADIUS_KM:g} km)"
+    ax.set_ylabel(ylabel)
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:g}%"))
     ax.grid(True, linestyle=":", linewidth=0.8, alpha=0.7)
     ax.legend(loc="best", frameon=False, fontsize=9, handlelength=4.0)
     fig.autofmt_xdate()
