@@ -6,6 +6,9 @@ linearly interpolates NR to each member grid and computes RMSE over member grid
 points inside both the NR d03 linear-interpolation footprint and a configurable
 radius around the NR TC center.
 
+An additional figure shows the weak- and strong-coupling errors relative to the
+uncoupled error, (e_n - e_x) / e_n * 100.
+
 All parameters are configured explicitly in this file. No command-line
 arguments are used.
 """
@@ -38,6 +41,8 @@ TC_RADIUS_KM = 150.0
 CENTER_PRESSURE_VAR = "PSFC"
 
 EXPERIMENTS = ["6mem_oceanAssim0Run0", "6mem_oceanAssim0Run1", "6mem_oceanAssim1Run1"]
+# 0Run0 = no ocean assimilation and no ocean model: the uncoupled baseline e_n.
+UNCOUPLED_EXPERIMENT = "6mem_oceanAssim0Run0"
 FILTERS = ["QCF_RHF"]
 MEMBERS = ["006", "015", "029", "037", "043", "044"]
 FLUX_SUM_VARIABLES = {"QFX", "QHX", "HFX", "LH", "LHFLX", "LHFX"}
@@ -62,6 +67,11 @@ WRF_R_D_OVER_CP = 287.0 / 1004.0
 #     mass-grid variables: XLAT/XLONG
 #     U-staggered variables: XLAT_U/XLONG_U
 #     V-staggered variables: XLAT_V/XLONG_V
+# metric controls how the error is measured:
+#     "auto"    -> names in FLUX_SUM_VARIABLES use grid-sum difference,
+#                  all other variables use spatial RMSE.
+#     "rmse"    -> force spatial RMSE (e.g. for HFX).
+#     "sumdiff" -> force grid-sum difference (flux totals).
 # TARGET_VARIABLE = {
 #     "name": "OM_TMP",
 #     "vertical_level": 0,
@@ -80,12 +90,13 @@ TARGET_VARIABLE = {
     "vertical_level": None,
     "scale": 1,
     "power": 1.0,
+    "metric": "rmse",
     "unit": "k",
     "experiments": EXPERIMENTS,
     "lat_name": None,
     "lon_name": None,
-    "out_csv": Path("./figs/hfx_error_timeseries.csv"),
-    "out_png": Path("./figs/hfx_error_timeseries.png"),
+    "out_csv": Path("./figs/hfx_rmse_timeseries.csv"),
+    "out_png": Path("./figs/hfx_rmse_timeseries.png"),
 }
 
 # Example for a 3-D atmospheric variable:
@@ -415,6 +426,11 @@ def unit_slug(variable: dict) -> str:
 
 
 def is_flux_sum_variable(variable: dict) -> bool:
+    metric = variable.get("metric", "auto")
+    if metric == "sumdiff":
+        return True
+    if metric == "rmse":
+        return False
     return variable["vertical_level"] is None and variable["name"].upper() in FLUX_SUM_VARIABLES
 
 
@@ -602,6 +618,100 @@ def plot(df: pd.DataFrame, variable: dict) -> None:
     plt.close(fig)
 
 
+def relative_difference_table(df: pd.DataFrame, variable: dict) -> pd.DataFrame:
+    """Return (e_n - e_x) / e_n * 100 for weak/strong coupling versus uncoupled.
+
+    e_n is the uncoupled error at the same time and filter; e_x is the weak or
+    strong coupled error. A negative value means the coupled error is larger.
+    """
+    metric = rmse_column(variable)
+    base = df.loc[
+        df["experiment"] == UNCOUPLED_EXPERIMENT, ["time", "filter", metric]
+    ].rename(columns={metric: "uncoupled_error"})
+
+    experiments = [e for e in variable["experiments"] if e != UNCOUPLED_EXPERIMENT]
+    other = df.loc[
+        df["experiment"].isin(experiments),
+        ["time", "filter", "experiment", metric],
+    ].rename(columns={metric: "experiment_error"})
+    table = other.merge(base, on=["time", "filter"], how="left")
+
+    e_n = table["uncoupled_error"].to_numpy(dtype=float)
+    e_x = table["experiment_error"].to_numpy(dtype=float)
+    relative = np.full(e_n.shape, np.nan, dtype=float)
+    valid = np.isfinite(e_n) & np.isfinite(e_x) & (e_n != 0.0)
+    relative[valid] = (e_n[valid] - e_x[valid]) / e_n[valid] * 100.0
+    table["relative_difference_percent"] = relative
+    return table
+
+
+def plot_relative_difference(df: pd.DataFrame, variable: dict) -> Path | None:
+    """Plot weak/strong error differences relative to the uncoupled run."""
+    if UNCOUPLED_EXPERIMENT not in variable["experiments"]:
+        print(
+            f"Skipping relative-difference figure: {UNCOUPLED_EXPERIMENT!r} "
+            "is not in variable['experiments']."
+        )
+        return None
+
+    table = relative_difference_table(df, variable)
+    fig, ax = plt.subplots(figsize=(8.2, 4.6))
+    for exp in variable["experiments"]:
+        if exp == UNCOUPLED_EXPERIMENT:
+            continue
+        for filt in FILTERS:
+            sub = table[
+                (table["experiment"] == exp) & (table["filter"] == filt)
+            ].copy()
+            if sub.empty or sub["relative_difference_percent"].notna().sum() == 0:
+                continue
+            sub["time_dt"] = pd.to_datetime(sub["time"], format="%Y-%m-%d_%H:%M:%S")
+            sub = sub.sort_values("time_dt")
+            ax.plot(
+                sub["time_dt"],
+                sub["relative_difference_percent"],
+                color=EXP_COLORS[exp],
+                linestyle=FILTER_LINESTYLES[filt],
+                linewidth=2.1,
+                marker=FILTER_MARKERS[filt],
+                markersize=3.5,
+                label=f"{exp} / {filt}",
+                dash_capstyle="butt",
+            )
+
+    ax.axhline(0.0, color="0.35", linewidth=1.0, zorder=0)
+    ax.set_xlabel("Forecast time")
+    metric_label = (
+        "mean member grid-sum difference"
+        if is_flux_sum_variable(variable)
+        else "mean member RMSE"
+    )
+    if TC_RADIUS_KM is None:
+        region_label = "NR-overlap"
+    else:
+        region_label = f"TC {TC_RADIUS_KM:g} km"
+    ax.set_ylabel(
+        f"{region_label} {metric_label} of {variable_label(variable)} "
+        "relative difference vs uncoupled (%)\n"
+        "negative = experiment error larger than uncoupled"
+    )
+    ax.grid(True, linestyle=":", linewidth=0.8, alpha=0.7)
+    ax.legend(loc="best", frameon=False, fontsize=9, handlelength=4.0)
+    fig.autofmt_xdate()
+    fig.tight_layout()
+
+    out_png = variable.get("out_relative_png")
+    if out_png is None:
+        out_png = variable["out_png"].with_name(
+            f"{variable['out_png'].stem}_relative{variable['out_png'].suffix}"
+        )
+    out_png = Path(out_png)
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_png, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return out_png
+
+
 def main() -> None:
     times = build_times(START_TIME, END_TIME, STEP_MINUTES)
     df = calculate(times, TARGET_VARIABLE)
@@ -609,9 +719,12 @@ def main() -> None:
     TARGET_VARIABLE["out_csv"].parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(TARGET_VARIABLE["out_csv"], index=False)
     plot(df, TARGET_VARIABLE)
+    relative_png = plot_relative_difference(df, TARGET_VARIABLE)
 
     print(f"Saved {TARGET_VARIABLE['out_csv']}")
     print(f"Saved {TARGET_VARIABLE['out_png']}")
+    if relative_png is not None:
+        print(f"Saved {relative_png}")
 
 
 if __name__ == "__main__":
