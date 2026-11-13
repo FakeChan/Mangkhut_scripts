@@ -5,6 +5,20 @@ import netCDF4
 from scipy.interpolate import griddata
 from kc_functions import getTClocation,calculate_rmse,getNC_realT
 from param import *
+
+import hashlib
+import os
+from pathlib import Path
+
+# =====================
+# User configuration
+# =====================
+USE_CACHE = True              # reuse extracted/interpolated fields between runs
+FORCE_REFRESH = False         # True: ignore an existing cache and recompute
+CACHE_VERSION = 1             # bump to invalidate old cache files
+CACHE_DIR = Path(__file__).resolve().parent / "figs" / "cache"
+TITLE_FONT_SIZE = 16          # subplot title font size
+PANEL_LETTER_SIZE = 20        # bold a/b/c/... panel labels
 def getTCnest(NR_path,domain,var,plev,ocean_lev=0):
     # create a nest from 300m NR
     
@@ -85,6 +99,108 @@ def interp_grid(grid_lats,grid_lons,input_ncdata,input_lats,input_lons,method='l
     interp_valus=griddata(points, values, (grid_lons, grid_lats), method=method)
     return interp_valus
 
+
+def _abspath(path):
+    return os.path.abspath(os.fspath(path))
+
+
+def _file_signature(paths):
+    paths = list(paths)
+    return (
+        np.asarray([_abspath(p) for p in paths]),
+        np.asarray([os.path.getmtime(p) for p in paths], dtype=float),
+        np.asarray([os.path.getsize(p) for p in paths], dtype=np.int64),
+    )
+
+
+def cache_file_path(var, domain, plev, ocean_lev, interp_method, nr_path, anal_files):
+    key = "|".join([
+        str(CACHE_VERSION), str(var), str(domain), str(plev), str(ocean_lev),
+        str(interp_method), _abspath(nr_path),
+        *[_abspath(p) for p in anal_files],
+    ])
+    digest = hashlib.md5(key.encode("utf-8")).hexdigest()[:12]
+    safe_plev = str(plev).replace("/", "-").replace(" ", "")
+    name = f"EAKFvsQCF_{var}_{domain}_{safe_plev}_ocean{ocean_lev}_{digest}.npz"
+    return Path(CACHE_DIR) / name
+
+
+def load_cached_fields(cache_path, var, domain, plev, ocean_lev,
+                       interp_method, nr_path, anal_files):
+    if FORCE_REFRESH or not Path(cache_path).is_file():
+        return None
+    try:
+        with np.load(cache_path, allow_pickle=False) as data:
+            if int(data["cache_version"].item()) != CACHE_VERSION:
+                return None
+            if (str(data["var"].item()) != str(var)
+                    or str(data["domain"].item()) != str(domain)
+                    or str(data["plev"].item()) != str(plev)
+                    or int(data["ocean_lev"].item()) != int(ocean_lev)
+                    or str(data["interp_method"].item()) != str(interp_method)):
+                return None
+            cached_paths, cached_mtimes, cached_sizes = _file_signature(
+                [nr_path] + list(anal_files))
+            if not np.array_equal(data["source_paths"], cached_paths):
+                return None
+            if not np.array_equal(data["source_mtimes"], cached_mtimes):
+                return None
+            if not np.array_equal(data["source_sizes"], cached_sizes):
+                return None
+            extract_lats = data["extract_lats"]
+            extract_lons = data["extract_lons"]
+            nr_values = data["NR_values"]
+            interp_values_list = [data[f"interp_{i}"] for i in range(len(anal_files))]
+            level_tag = str(data["level_tag"].item())
+        return extract_lats, extract_lons, nr_values, interp_values_list, level_tag
+    except Exception as exc:
+        print(f"Cache read failed ({exc}); recomputing.")
+        return None
+
+
+def save_cached_fields(cache_path, var, domain, plev, ocean_lev,
+                       interp_method, nr_path, anal_files, level_tag,
+                       extract_lats, extract_lons, nr_values,
+                       interp_values_list):
+    cache_path = Path(cache_path)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    source_paths, source_mtimes, source_sizes = _file_signature(
+        [nr_path] + list(anal_files))
+    arrays = {
+        "cache_version": np.asarray(CACHE_VERSION),
+        "var": np.asarray(str(var)),
+        "domain": np.asarray(str(domain)),
+        "plev": np.asarray(str(plev)),
+        "ocean_lev": np.asarray(int(ocean_lev)),
+        "interp_method": np.asarray(str(interp_method)),
+        "level_tag": np.asarray(str(level_tag)),
+        "source_paths": source_paths,
+        "source_mtimes": source_mtimes,
+        "source_sizes": source_sizes,
+        "extract_lats": extract_lats,
+        "extract_lons": extract_lons,
+        "NR_values": nr_values,
+    }
+    for i, values in enumerate(interp_values_list):
+        arrays[f"interp_{i}"] = values
+    tmp_path = cache_path.with_name(cache_path.name + ".tmp")
+    with open(tmp_path, "wb") as stream:
+        np.savez_compressed(stream, **arrays)
+    os.replace(tmp_path, cache_path)
+
+
+def add_panel_letter(axs, letter):
+    axs.text(
+        -0.07, 1.02, letter,
+        transform=axs.transAxes,
+        fontsize=PANEL_LETTER_SIZE,
+        fontweight="bold",
+        ha="left",
+        va="bottom",
+        clip_on=False,
+    )
+
+
 if __name__ =='__main__':
     var='OM_TMP'
     domain='d01'
@@ -102,59 +218,77 @@ if __name__ =='__main__':
     title_list=['firstguess','EAKF','QCF_RHF']
     NR_path='/share/home/lililei1/kcfu/tc_mangkhut/NR_wrfout/2domain/wrfout_d01_2018-09-10_00:00:00'
     #-----------------------------
-    #first extract NR data
-    extract_lats,extract_lons,NR_values=getTCnest(NR_path,domain,var=var,plev=plev,ocean_lev=ocean_lev)
-    print('----------------NR extracted---------------------')
-    
-    # List to hold all data arrays for min/max calculation
-    all_data_for_scale = [NR_values]
-    interp_values_list = []
-    
-    # --- Data Processing Loop for finding global min/max ---
-    for ifile,file in enumerate(anal_file_list):
-        print(f'now proceeding {file[-26:-1]}')
-        nc_ds=xr.open_dataset(file,engine='netcdf4')
-        
-        if var=='U':
-            input_lats=nc_ds['XLAT_U'].values
-            input_lons=nc_ds['XLONG_U'].values
-        elif var =='V':
-            input_lats=nc_ds['XLAT_V'].values
-            input_lons=nc_ds['XLONG_V'].values
-        else:
-            input_lats=nc_ds['XLAT'].values
-            input_lons=nc_ds['XLONG'].values
-            
-        var_data=nc_ds[var][0]
-        # 注意: 这里假设 plev_dict 在其他地方 (如 param.py 或 kc_functions.py) 已定义
-        if 'bottom_top' in var_data.dims or 'bottom_top_stag' in var_data.dims:
-            if var =='THM':
-                data_values=getNC_realT(nc_ds,plev_dict[plev])
+    interp_method = 'linear'
+    cache_path = cache_file_path(
+        var, domain, plev, ocean_lev, interp_method, NR_path, anal_file_list)
+    cached = (load_cached_fields(
+        cache_path, var, domain, plev, ocean_lev,
+        interp_method, NR_path, anal_file_list)
+        if USE_CACHE else None)
+
+    if cached is not None:
+        extract_lats, extract_lons, NR_values, interp_values_list, string = cached
+        print(f'Loaded cache: {cache_path}')
+    else:
+        #first extract NR data
+        extract_lats,extract_lons,NR_values=getTCnest(NR_path,domain,var=var,plev=plev,ocean_lev=ocean_lev)
+        print('----------------NR extracted---------------------')
+
+        interp_values_list = []
+        # --- Data Processing Loop for finding global min/max ---
+        for ifile,file in enumerate(anal_file_list):
+            print(f'now proceeding {file[-26:-1]}')
+            nc_ds=xr.open_dataset(file,engine='netcdf4')
+
+            if var=='U':
+                input_lats=nc_ds['XLAT_U'].values
+                input_lons=nc_ds['XLONG_U'].values
+            elif var =='V':
+                input_lats=nc_ds['XLAT_V'].values
+                input_lons=nc_ds['XLONG_V'].values
             else:
-                data_values = var_data[plev_dict[plev], :, :].values
-            string=plev
-        elif 'ocean_layer_stag' in var_data.dims:
-            #ocean vars
-            data_values = var_data[ocean_lev,:,:].values
-            string=f'ocean{ocean_lev}'
-        else:
-            # 2D 变量 (如 T2, PSFC)
-            data_values = var_data.values
-            string=''
-            
-        #interpolate
-        print(f'shape of lon:{input_lons.size}')
-        print(f'shape of {var}: {data_values.size}')
-        interp_values=interp_grid(
-            grid_lats=extract_lats,
-            grid_lons=extract_lons,
-            input_ncdata=data_values,
-            input_lats=input_lats,
-            input_lons=input_lons,
-            method='linear'
-        )
-        interp_values_list.append(interp_values)
-        all_data_for_scale.append(interp_values) # Collect all data for scale calculation
+                input_lats=nc_ds['XLAT'].values
+                input_lons=nc_ds['XLONG'].values
+
+            var_data=nc_ds[var][0]
+            # 注意: 这里假设 plev_dict 在其他地方 (如 param.py 或 kc_functions.py) 已定义
+            if 'bottom_top' in var_data.dims or 'bottom_top_stag' in var_data.dims:
+                if var =='THM':
+                    data_values=getNC_realT(nc_ds,plev_dict[plev])
+                else:
+                    data_values = var_data[plev_dict[plev], :, :].values
+                string=plev
+            elif 'ocean_layer_stag' in var_data.dims:
+                #ocean vars
+                data_values = var_data[ocean_lev,:,:].values
+                string=f'ocean{ocean_lev}'
+            else:
+                # 2D 变量 (如 T2, PSFC)
+                data_values = var_data.values
+                string=''
+
+            #interpolate
+            print(f'shape of lon:{input_lons.size}')
+            print(f'shape of {var}: {data_values.size}')
+            interp_values=interp_grid(
+                grid_lats=extract_lats,
+                grid_lons=extract_lons,
+                input_ncdata=data_values,
+                input_lats=input_lats,
+                input_lons=input_lons,
+                method=interp_method
+            )
+            interp_values_list.append(interp_values)
+
+        if USE_CACHE:
+            save_cached_fields(
+                cache_path, var, domain, plev, ocean_lev,
+                interp_method, NR_path, anal_file_list, string,
+                extract_lats, extract_lons, NR_values, interp_values_list)
+            print(f'Saved cache: {cache_path}')
+
+    # List to hold all data arrays for min/max calculation
+    all_data_for_scale = [NR_values] + list(interp_values_list)
     
     # 计算全局最小值和最大值，用于统一色条
     # Flatten所有数组并合并，然后计算非NaN的min/max
@@ -217,13 +351,15 @@ if __name__ =='__main__':
     # ==============================================================================
     # 注意：这里 ax 形状是 (2, 4) -> [2行, (1个NR + 3个Anal)列]
     fig, ax = plt.subplots(2, len(anal_file_list) + 1, figsize=(40, 20)) # 稍微调小一点figsize，太大会导致字体显得极小
+    panel_letters = iter('abcdefghijklmnopqrstuvwxyz')
 
     # --- 绘制第一行：绝对量 (NR + Analysis) ---
-    
+
     # 1.1 画 NR (Reference)
     ax_NR = ax[0, 0]
     cf_abs = ax_NR.pcolor(NR_values, cmap='jet',vmin=vmin_abs,vmax=vmax_abs)
-    ax_NR.set_title('NR (Truth)', fontsize=24)
+    ax_NR.set_title('NR (Truth)', fontsize=TITLE_FONT_SIZE)
+    add_panel_letter(ax_NR, next(panel_letters))
     
     # 1.2 画 Analysis
     for ifile, interp_values in enumerate(interp_values_list):
@@ -233,9 +369,10 @@ if __name__ =='__main__':
         # 标题处理
         title_parts = anal_file_list[ifile].split('/')
         # 取出 EAKF/preassim 这种区分度高的字段
-        title_str = f"{title_parts[-2]}\n{title_list[ifile]}" 
+        title_str = f"{title_parts[-2]}\n{title_list[ifile]}"
         # title_str=title_list[ifile]
-        axs.set_title(title_str, fontsize=24)
+        axs.set_title(title_str, fontsize=TITLE_FONT_SIZE)
+        add_panel_letter(axs, next(panel_letters))
 
     # --- 绘制第二行：增量 (Analysis - NR) ---
     
@@ -248,7 +385,8 @@ if __name__ =='__main__':
         axs = ax[1, ifile + 1]
         # 使用 seismic 或 bwr (Blue-White-Red) colormap
         cf_diff = axs.pcolor(diff_val, cmap='seismic',vmin=-max_diff,vmax=max_diff)
-        axs.set_title(f'RMSE: {RMSE_values[ifile]}', fontsize=24)
+        axs.set_title(f'RMSE: {RMSE_values[ifile]}', fontsize=TITLE_FONT_SIZE)
+        add_panel_letter(axs, next(panel_letters))
 
     # ==============================================================================
     # 4. 添加 Colorbars (调整大小和位置)
