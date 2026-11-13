@@ -119,8 +119,11 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 require_file() { [[ -s $1 ]] || die "missing or empty input: $1"; }
 
 # Python: read_nc_times —— 取 NetCDF 里的时间字符串（简化：只用 ncdump 抓）
+# 只解析 data: 之后的数据段 —— 文件头里的全局属性（如 START_DATE）同样是
+# "YYYY-MM-DD_HH:MM:SS" 形式，若整段 grep 会先命中属性而不是 Times 变量。
 nc_times() {
   ncdump -v "${2:-Times}" -p 9,18 "$1" 2>/dev/null \
+    | sed -n '/^data:/,$p' \
     | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}:[0-9]{2}:[0-9]{2}' || true
 }
 
