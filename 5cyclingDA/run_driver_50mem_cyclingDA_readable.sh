@@ -84,7 +84,18 @@ export WRF_MPI="${WRF_MPI:-mpiexec.hydra}"
 
 # ======================= 常量与时间轴（Python: START/MEMBERS/cycles()）=====
 START_ISO="2018-09-10 00:00:00"
-START_STAMP=$(date -u -d "$START_ISO" '+%Y-%m-%d_%H:%M:%S')
+
+# 时间工具：加减一律走 epoch。不要用 date -d "<完整时刻> +N hours" —— GNU date 会把
+# 结尾的 +N 当成时区偏移（实测 "2018-09-10 00:00:00 +6 hours" 得到 09-09 19:00）。
+to_epoch()       { date -u -d "$1" '+%s'; }
+from_epoch()     { date -u -d "@$1" '+%Y-%m-%d %H:%M:%S'; }
+stamp_of()       { date -u -d "$1" '+%Y-%m-%d_%H:%M:%S'; }   # 2018-09-10_00:00:00
+tag_of()         { date -u -d "$1" '+%d_%H_%M'; }            # 10_00_00
+tag_from_stamp() { local s=$1; printf '%s_%s_%s' "${s:8:2}" "${s:11:2}" "${s:14:2}"; }
+shift_hours()    { local ts; ts=$(to_epoch "$1"); from_epoch $((ts + $2 * 3600)); }
+shift_minutes()  { local ts; ts=$(to_epoch "$1"); from_epoch $((ts + $2 * 60)); }
+
+START_STAMP=$(stamp_of "$START_ISO")
 DOMAINS=(d01 d02)
 ATM_VARS="MU,P,PH,QVAPOR,THM,U,V,W"
 OCEAN_VARS="OM_TMP,OM_S,OM_U,OM_V"
@@ -97,18 +108,13 @@ CYCLE_HOURS=(1 1 1 6)
 CYCLE_LAGS=("0 3 6" "0 4 7" "0 5 8" "0 3 6")
 CYCLE_ISOS=()
 for ((i = 0; i < CYCLE_COUNT; i++)); do
-  CYCLE_ISOS+=("$(date -u -d "$START_ISO +$i hours" '+%Y-%m-%d %H:%M:%S')")
+  CYCLE_ISOS+=("$(shift_hours "$START_ISO" "$i")")
 done
-FINAL_END_STAMP=$(date -u -d "${CYCLE_ISOS[CYCLE_COUNT-1]} +${CYCLE_HOURS[CYCLE_COUNT-1]} hours" '+%Y-%m-%d_%H:%M:%S')
+FINAL_END_STAMP=$(stamp_of "$(shift_hours "${CYCLE_ISOS[CYCLE_COUNT-1]}" "${CYCLE_HOURS[CYCLE_COUNT-1]}")")
 
 # ============================== 小工具 =====================================
 log()  { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
-
-stamp_of() { date -u -d "$1" '+%Y-%m-%d_%H:%M:%S'; }      # 2018-09-10_00:00:00
-tag_of()   { date -u -d "$1" '+%d_%H_%M'; }               # 10_00_00
-tag_from_stamp() { local s=$1; printf '%s_%s_%s' "${s:8:2}" "${s:11:2}" "${s:14:2}"; }
-shift_iso() { date -u -d "$1 $2" '+%Y-%m-%d %H:%M:%S'; }  # shift_iso "2018-09-10 00:00:00" "+1 hours"
 
 require_file() { [[ -s $1 ]] || die "missing or empty input: $1"; }
 
@@ -399,9 +405,9 @@ preflight() {
   done
   while read -r f; do [[ -s $f ]] || ISSUES+=("missing or empty input: $f"); done < <(rttov_files)
   # DA 模板只检查本次实际会用到的那几个
-  [[ " ${GROUPS[*]} " == *" 3 "* ]] && { [[ -s $DART_TEMPLATE_DIR/input.nml.inflateOcean ]] || ISSUES+=("missing template: input.nml.inflateOcean"); }
-  [[ " ${GROUPS[*]} " == *" 3 "* ]] && { [[ -s $DART_TEMPLATE_DIR/input.nml.all ]] || ISSUES+=("missing template: input.nml.all"); }
-  [[ " ${GROUPS[*]} " == *" 1 "* || " ${GROUPS[*]} " == *" 2 "* ]] && { [[ -s $DART_TEMPLATE_DIR/input.nml.air ]] || ISSUES+=("missing template: input.nml.air"); }
+  [[ " ${SELECTED_GROUPS[*]} " == *" 3 "* ]] && { [[ -s $DART_TEMPLATE_DIR/input.nml.inflateOcean ]] || ISSUES+=("missing template: input.nml.inflateOcean"); }
+  [[ " ${SELECTED_GROUPS[*]} " == *" 3 "* ]] && { [[ -s $DART_TEMPLATE_DIR/input.nml.all ]] || ISSUES+=("missing template: input.nml.all"); }
+  [[ " ${SELECTED_GROUPS[*]} " == *" 1 "* || " ${SELECTED_GROUPS[*]} " == *" 2 "* ]] && { [[ -s $DART_TEMPLATE_DIR/input.nml.air ]] || ISSUES+=("missing template: input.nml.air"); }
   [[ " ${FILTERS[*]} " == *" QCF_RHF "* ]] && { [[ -s $DART_TEMPLATE_DIR/qceff_table_fkc.csv ]] || ISSUES+=("missing qceff_table_fkc.csv"); }
 
   # 50 成员 × 2 域 初始场、ICBC、历史 LACC 源、NR 场
@@ -421,7 +427,7 @@ preflight() {
     done
     for moment in 3 6; do
       local hist
-      hist=$(date -u -d "$START_ISO -$moment hours" '+%Y-%m-%d_%H:%M:%S')
+      hist=$(stamp_of "$(shift_hours "$START_ISO" "-$moment")")
       need_state "$HISTORY_ROOT/mem$(printf '%03d' "$m")/wrfout_${HX_STATE_DOMAIN}_${hist}" "$hist" "${hx_vars[@]}"
     done
     need_state "$(ic_path "$m")" "$START_STAMP" OM_TINI OM_SINI
@@ -453,7 +459,7 @@ nr_times() {
   local c lag t
   for ((c = 0; c < CYCLE_COUNT; c++)); do
     for lag in ${CYCLE_LAGS[$c]}; do
-      t=$(date -u -d "${CYCLE_ISOS[$c]} -$lag hours" '+%Y-%m-%d_%H:%M:%S')
+      t=$(stamp_of "$(shift_hours "${CYCLE_ISOS[$c]}" "-$lag")")
       printf '%s\n' "$t"
     done
   done | sort -u
@@ -465,13 +471,13 @@ set_cycle() {
   local i=$1 lag t
   CYCLE_ISO=${CYCLE_ISOS[$i]}
   CYCLE_HOURS_H=${CYCLE_HOURS[$i]}
-  CEND_ISO=$(shift_iso "$CYCLE_ISO" "+$CYCLE_HOURS_H hours")
+  CEND_ISO=$(shift_hours "$CYCLE_ISO" "$CYCLE_HOURS_H")
   CSTAMP=$(stamp_of "$CYCLE_ISO")
   CEND_STAMP=$(stamp_of "$CEND_ISO")
   CTAG=$(tag_of "$CYCLE_ISO")
   LACC_STAMPS=(); LACC_TAGS=()
   for lag in ${CYCLE_LAGS[$i]}; do
-    t=$(date -u -d "$CYCLE_ISO -$lag hours" '+%Y-%m-%d %H:%M:%S')
+    t=$(shift_hours "$CYCLE_ISO" "-$lag")
     LACC_STAMPS+=("$(stamp_of "$t")")
     LACC_TAGS+=("$(tag_of "$t")")
   done
@@ -495,7 +501,7 @@ experiment_signature() {
     inputs+=("$(bc_path "$m")" "$(ic_path "$m")")
     for dom in "${DOMAINS[@]}"; do inputs+=("$INITIAL_PRIOR_DIR/firstguess_${dom}.mem$(printf '%03d' "$m")"); done
     for h in 3 6; do
-      inputs+=("$HISTORY_ROOT/mem$(printf '%03d' "$m")/wrfout_${HX_STATE_DOMAIN}_$(date -u -d "$START_ISO -$h hours" '+%Y-%m-%d_%H:%M:%S')")
+      inputs+=("$HISTORY_ROOT/mem$(printf '%03d' "$m")/wrfout_${HX_STATE_DOMAIN}_$(stamp_of "$(shift_hours "$START_ISO" "-$h")")")
     done
   done
   while read -r t; do inputs+=("$NR_ROOT/wrfout_d02_${t}"); done < <(nr_times)
@@ -785,7 +791,7 @@ assimilate() {
 expected_wrf_files() {  # <dir> ; 打印 "路径 时刻"
   local dir=$1 minute moment dom
   for ((minute = 0; minute <= CYCLE_HOURS_H * 60; minute += 30)); do
-    moment=$(stamp_of "$(shift_iso "$CYCLE_ISO" "+$minute minutes")")
+    moment=$(stamp_of "$(shift_minutes "$CYCLE_ISO" "$minute")")
     for dom in "${DOMAINS[@]}"; do
       printf '%s %s\n' "$dir/wrfout_${dom}_${moment}" "$moment"
     done
@@ -1047,7 +1053,7 @@ run() {
   exec 9>"$RUN_ROOT/.driver.lock"
   flock -n 9 || die "another driver owns RUN_ROOT: $RUN_ROOT"
   local g f
-  for g in "${GROUPS[@]}"; do
+  for g in "${SELECTED_GROUPS[@]}"; do
     for f in "${FILTERS[@]}"; do
       run_experiment "$g" "$f"
     done
@@ -1088,7 +1094,7 @@ plan() {
   printf '{\n  "members": 50,\n  "domains": ["d01","d02"],\n  "hx_state_domain": "%s",\n' "$HX_STATE_DOMAIN"
   printf '  "boundary_mem001": "%s",\n  "initialization_mem001": "%s",\n' "$(bc_path 1)" "$(ic_path 1)"
   printf '  "experiments": [\n'
-  for g in "${GROUPS[@]}"; do
+  for g in "${SELECTED_GROUPS[@]}"; do
     for f in "${FILTERS[@]}"; do
       set_experiment "$g" "$f"
       printf '    {"group": %d, "filter": "%s", "root": "%s", "update_ocean": %d, "run_ocean": %d,\n' \
@@ -1112,12 +1118,13 @@ plan() {
 
 main() {
   # 从环境变量组装实验清单（顺序固定：group 1,2,3 × filter EAKF,QCF_RHF）
-  GROUPS=()
+  # 注意：变量名不能叫 GROUPS —— 那是 bash 内建只读数组，赋值会失败。
+  SELECTED_GROUPS=()
   FILTERS=()
   for g in 1 2 3; do
     local flag=RUN_GROUP_$g
     [[ ${!flag} == 0 || ${!flag} == 1 ]] || die "$flag must be 0 or 1"
-    [[ ${!flag} -eq 1 ]] && GROUPS+=("$g")
+    [[ ${!flag} -eq 1 ]] && SELECTED_GROUPS+=("$g")
   done
   local f
   for f in EAKF QCF_RHF; do
@@ -1125,7 +1132,7 @@ main() {
     [[ ${!flag} == 0 || ${!flag} == 1 ]] || die "$flag must be 0 or 1"
     [[ ${!flag} -eq 1 ]] && FILTERS+=("$f")
   done
-  ((${#GROUPS[@]})) && ((${#FILTERS[@]})) || die "select at least one coupling group and one filter"
+  ((${#SELECTED_GROUPS[@]})) && ((${#FILTERS[@]})) || die "select at least one coupling group and one filter"
   [[ $HX_STATE_DOMAIN == d01 || $HX_STATE_DOMAIN == d02 ]] || die "HX_STATE_DOMAIN must be d01/d02"
   ((ASSIM_CHANNEL >= 1 && ASSIM_CHANNEL <= 6)) || die "channel must be 1..6"
   case $MODE in
