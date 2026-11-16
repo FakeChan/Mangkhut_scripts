@@ -24,9 +24,13 @@ JTWC data
     rows share a timestamp (one per wind-radii entry); only the first row of
     each timestamp is kept.
 
+The minimum PSFC is searched only inside SEARCH_RADIUS_KM around the JTWC
+centre interpolated to the NR time. A whole-domain minimum is contaminated by
+terrain-induced lows far away from the storm, which look like a second TC
+centre.
+
 Figure layout: two panels sharing the x axis, restricted to the NR window.
-    top    : minimum surface pressure (hPa), y axis inverted so that a rising
-             curve means intensification
+    top    : minimum surface pressure (hPa), larger values on top
     bottom : maximum 10-m wind speed (kt), with a secondary m/s axis
 
 All parameters are configured explicitly in this file. No command-line
@@ -69,10 +73,13 @@ PLOT_START = None
 PLOT_END = None
 
 # --- 极值搜索方式 ---
-#   "domain"   : 在全网格上取最小气压 / 最大风速（默认；d01 内山竹是绝对主导系统）
-#   "jtwc_box" : 在 JTWC 插值中心 +-SEARCH_HALF_WIDTH_DEG 的方框内取极值
-SEARCH_MODE = "domain"
-SEARCH_HALF_WIDTH_DEG = 8.0
+#   "jtwc_radius" : 在 JTWC 插值中心 SEARCH_RADIUS_KM 半径内取极值（默认）。
+#                   d01 域内有地形，全域最小值会抓到远离台风的虚假低压中心。
+#   "domain"      : 在全网格上取极值（仅用于调试对比）
+SEARCH_MODE = "jtwc_radius"
+SEARCH_RADIUS_KM = 200.0
+# 最大风速是否也限制在同一半径内（False = 风速仍取全域最大值）
+RESTRICT_WIND_TO_RADIUS = True
 
 # --- 缓存（NR 抽取一次约 1-3 分钟，重绘时直接复用 CSV） ---
 USE_CACHE = True
@@ -224,14 +231,35 @@ def _read_2d(dataset, name):
     return np.ma.filled(np.ma.asarray(raw, dtype=np.float64), np.nan)
 
 
-def nr_intensity(path, search_mode="domain", jtwc_center=None, half_width_deg=8.0):
+def great_circle_distance_km(lats, lons, center_lat, center_lon):
+    """球面大圆距离（km），与 plot_cycle_rmse_times.py 中的实现保持一致。"""
+    earth_radius_km = 6371.0
+    lat1 = np.deg2rad(lats)
+    lon1 = np.deg2rad(lons)
+    lat2 = np.deg2rad(center_lat)
+    lon2 = np.deg2rad(center_lon)
+    dlat = lat1 - lat2
+    dlon = lon1 - lon2
+    a = (
+        np.sin(dlat / 2.0) ** 2
+        + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
+    )
+    return 2.0 * earth_radius_km * np.arcsin(np.sqrt(a))
+
+
+def nr_intensity(path, search_mode="jtwc_radius", jtwc_center=None,
+                 radius_km=200.0, restrict_wind=True):
     """
     从一个 NR wrfout 中提取台风强度。
 
-    返回 dict：time 由调用方补充，这里给出
-        mslp_hpa   最小地面气压（hPa）
-        vmax_kt    最大 10 m 风速（kt）
-        center_lat / center_lon  最小气压所在位置
+    search_mode="jtwc_radius" 时只在 jtwc_center 半径 radius_km 内搜索，
+    避开 d01 域内地形造成的虚假低压中心；jtwc_center 为 None 时退回全域。
+
+    返回 dict：
+        mslp_hpa           最小地面气压（hPa）
+        vmax_kt            最大 10 m 风速（kt）
+        center_lat/lon     最小气压所在位置
+        dist_from_jtwc_km  该位置到 JTWC 插值中心的距离（无 JTWC 位置时为 NaN）
     """
     with nc.Dataset(str(path)) as dataset:
         psfc = _read_2d(dataset, "PSFC")
@@ -248,38 +276,59 @@ def nr_intensity(path, search_mode="domain", jtwc_center=None, half_width_deg=8.
     wind_speed = np.hypot(u10, v10)
 
     mask = np.ones(psfc.shape, dtype=bool)
-    if search_mode == "jtwc_box" and jtwc_center is not None:
-        center_lat, center_lon = jtwc_center
-        mask &= np.abs(lats - center_lat) <= half_width_deg
-        mask &= np.abs(lons - center_lon) <= half_width_deg
+    if search_mode == "jtwc_radius" and jtwc_center is not None:
+        distance = great_circle_distance_km(lats, lons, *jtwc_center)
+        mask = distance <= radius_km
         if not np.any(mask & np.isfinite(psfc)):
-            mask = np.ones(psfc.shape, dtype=bool)   # 框内无有效值，退回全域
+            print(
+                f"    警告: {Path(path).name} 在 {radius_km:.0f} km 内没有"
+                "有效 PSFC，退回全域搜索",
+                flush=True,
+            )
+            mask = np.ones(psfc.shape, dtype=bool)
 
     pressure = np.where(mask, psfc, np.nan)
-    speed = np.where(mask, wind_speed, np.nan)
+    wind_mask = mask if restrict_wind else np.ones(psfc.shape, dtype=bool)
+    speed = np.where(wind_mask, wind_speed, np.nan)
 
     if not np.any(np.isfinite(pressure)):
         raise ValueError(f"{path}: 搜索范围内没有有效的 PSFC 值")
 
     center_idx = np.unravel_index(np.nanargmin(pressure), pressure.shape)
+    center_lat = float(lats[center_idx])
+    center_lon = float(lons[center_idx])
+
+    if jtwc_center is None:
+        dist_from_jtwc = np.nan
+    else:
+        dist_from_jtwc = float(
+            great_circle_distance_km(center_lat, center_lon, *jtwc_center)
+        )
 
     return {
         "mslp_hpa": float(pressure[center_idx]) * PA_TO_HPA,
         "vmax_kt": float(np.nanmax(speed)) * MS_TO_KT,
-        "center_lat": float(lats[center_idx]),
-        "center_lon": float(lons[center_idx]),
+        "center_lat": center_lat,
+        "center_lon": center_lon,
+        "dist_from_jtwc_km": dist_from_jtwc,
     }
 
 
-def extract_nr_series(files, search_mode="domain", jtwc_frame=None,
-                      half_width_deg=8.0):
+def extract_nr_series(files, search_mode="jtwc_radius", jtwc_frame=None,
+                      radius_km=200.0, restrict_wind=True):
     """遍历 NR 文件，抽取强度时间序列。"""
     rows = []
     total = len(files)
     for index, (stamp, path) in enumerate(files, start=1):
         jtwc_center = None
-        if search_mode == "jtwc_box" and jtwc_frame is not None:
+        if search_mode == "jtwc_radius" and jtwc_frame is not None:
             jtwc_center = _jtwc_center_at(jtwc_frame, stamp)
+            if jtwc_center is None:
+                print(
+                    f"    警告: {stamp:%Y-%m-%d %HZ} 超出 JTWC 时间范围，"
+                    "退回全域搜索",
+                    flush=True,
+                )
 
         print(f"[{index}/{total}] {path.name}", flush=True)
         try:
@@ -287,7 +336,8 @@ def extract_nr_series(files, search_mode="domain", jtwc_frame=None,
                 path,
                 search_mode=search_mode,
                 jtwc_center=jtwc_center,
-                half_width_deg=half_width_deg,
+                radius_km=radius_km,
+                restrict_wind=restrict_wind,
             )
         except Exception as error:                      # noqa: BLE001
             print(f"    跳过（读取失败）: {error}", flush=True)
@@ -304,24 +354,25 @@ def extract_nr_series(files, search_mode="domain", jtwc_frame=None,
 
 
 def _jtwc_center_at(jtwc_frame, stamp):
-    """把 JTWC 位置线性插值到给定时刻，用于 jtwc_box 搜索模式。"""
+    """
+    把 JTWC 位置线性插值到给定时刻，用于 jtwc_radius 搜索模式。
+
+    时间先转成"自 1970 起的整秒"再交给 np.interp：直接对 datetime64[ns]
+    转 float 会丢精度（2018 年的纳秒数约 1.5e18，超过 float64 的 2**53）。
+    """
     if jtwc_frame is None or jtwc_frame.empty:
         return None
-    times = jtwc_frame["time"].to_numpy()
-    target = np.datetime64(stamp)
+    times = jtwc_frame["time"].to_numpy().astype("datetime64[s]").astype(np.int64)
+    target = np.datetime64(stamp, "s").astype(np.int64)
     if target < times[0] or target > times[-1]:
         return None
-    lat = np.interp(target.astype("datetime64[s]").astype(float),
-                    times.astype("datetime64[s]").astype(float),
-                    jtwc_frame["lat"].to_numpy())
-    lon = np.interp(target.astype("datetime64[s]").astype(float),
-                    times.astype("datetime64[s]").astype(float),
-                    jtwc_frame["lon"].to_numpy())
+    lat = np.interp(target, times, jtwc_frame["lat"].to_numpy())
+    lon = np.interp(target, times, jtwc_frame["lon"].to_numpy())
     return float(lat), float(lon)
 
 
 def load_or_build_nr_series(files, cache_path, search_mode, jtwc_frame,
-                            half_width_deg, use_cache):
+                            radius_km, restrict_wind, use_cache):
     """带 CSV 缓存的 NR 序列抽取。"""
     cache_path = Path(cache_path)
     if use_cache and cache_path.is_file():
@@ -338,7 +389,8 @@ def load_or_build_nr_series(files, cache_path, search_mode, jtwc_frame,
         files,
         search_mode=search_mode,
         jtwc_frame=jtwc_frame,
-        half_width_deg=half_width_deg,
+        radius_km=radius_km,
+        restrict_wind=restrict_wind,
     )
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -396,7 +448,6 @@ def plot_intensity(nr_frame, jtwc_frame, out_png, plot_start, plot_end):
         zorder=4,
     )
     ax_pressure.set_ylabel("Minimum surface pressure (hPa)")
-    ax_pressure.invert_yaxis()          # 气压下降 = 增强 = 曲线向上
     ax_pressure.grid(True, linestyle=":", linewidth=0.6, alpha=0.7)
 
     # ---------- 下：最大 10 m 风速 ----------
@@ -433,35 +484,42 @@ def plot_intensity(nr_frame, jtwc_frame, out_png, plot_start, plot_end):
     secondary.set_ylabel("Maximum 10-m wind speed (m/s)")
 
     # ---------- 峰值标注 ----------
-    stats = []
+    pressure_stats = []
+    wind_stats = []
     if not nr_frame.empty:
         nr_pressure = nr_frame.loc[nr_frame["mslp_hpa"].idxmin()]
         nr_wind = nr_frame.loc[nr_frame["vmax_kt"].idxmax()]
-        stats.append(
-            f"NR  min {nr_pressure['mslp_hpa']:.1f} hPa "
+        pressure_stats.append(
+            f"NR   min {nr_pressure['mslp_hpa']:.1f} hPa "
             f"@ {nr_pressure['time']:%m-%d %HZ}"
         )
-        stats.append(
-            f"NR  max {nr_wind['vmax_kt']:.0f} kt "
+        wind_stats.append(
+            f"NR   max {nr_wind['vmax_kt']:.0f} kt "
             f"@ {nr_wind['time']:%m-%d %HZ}"
         )
+        if "dist_from_jtwc_km" in nr_frame.columns:
+            offset = nr_frame["dist_from_jtwc_km"].dropna()
+            if not offset.empty:
+                pressure_stats.append(
+                    f"NR-JTWC centre offset  mean {offset.mean():.0f} km"
+                )
     if not jtwc_frame.empty:
         jtwc_pressure = jtwc_frame.loc[jtwc_frame["mslp_hpa"].idxmin()]
         jtwc_wind = jtwc_frame.loc[jtwc_frame["vmax_kt"].idxmax()]
-        stats.append(
+        pressure_stats.append(
             f"JTWC min {jtwc_pressure['mslp_hpa']:.0f} hPa "
             f"@ {jtwc_pressure['time']:%m-%d %HZ}"
         )
-        stats.append(
+        wind_stats.append(
             f"JTWC max {jtwc_wind['vmax_kt']:.0f} kt "
             f"@ {jtwc_wind['time']:%m-%d %HZ}"
         )
 
-    if stats:
+    if pressure_stats:
         ax_pressure.text(
             0.015,
             0.04,
-            "\n".join(stats[:2]),
+            "\n".join(pressure_stats),
             transform=ax_pressure.transAxes,
             va="bottom",
             ha="left",
@@ -469,10 +527,11 @@ def plot_intensity(nr_frame, jtwc_frame, out_png, plot_start, plot_end):
             bbox={"boxstyle": "round,pad=0.3", "facecolor": "white",
                   "edgecolor": "0.7", "alpha": 0.85},
         )
+    if wind_stats:
         ax_wind.text(
             0.015,
             0.96,
-            "\n".join(stats[2:]),
+            "\n".join(wind_stats),
             transform=ax_wind.transAxes,
             va="top",
             ha="left",
@@ -533,13 +592,28 @@ def main():
         flush=True,
     )
 
-    cache_path = OUT_DIR / f"{OUT_STEM}_nr_{NR_DOMAIN}_cache.csv"
+    # 缓存文件名带上搜索参数，避免改了半径/模式后误用旧缓存
+    if SEARCH_MODE == "jtwc_radius":
+        cache_tag = f"r{SEARCH_RADIUS_KM:.0f}km"
+    else:
+        cache_tag = "domain"
+    cache_path = OUT_DIR / f"{OUT_STEM}_nr_{NR_DOMAIN}_{cache_tag}_cache.csv"
+    print(
+        f"极值搜索: {SEARCH_MODE}"
+        + (
+            f"，半径 {SEARCH_RADIUS_KM:.0f} km"
+            if SEARCH_MODE == "jtwc_radius"
+            else ""
+        ),
+        flush=True,
+    )
     nr_frame = load_or_build_nr_series(
         nr_files,
         cache_path,
         search_mode=SEARCH_MODE,
         jtwc_frame=jtwc_frame,
-        half_width_deg=SEARCH_HALF_WIDTH_DEG,
+        radius_km=SEARCH_RADIUS_KM,
+        restrict_wind=RESTRICT_WIND_TO_RADIUS,
         use_cache=USE_CACHE,
     )
 
@@ -575,6 +649,13 @@ def main():
         f"NR  : min PSFC {nr_frame['mslp_hpa'].min():.1f} hPa, "
         f"max wind {nr_frame['vmax_kt'].max():.1f} kt"
     )
+    if "dist_from_jtwc_km" in nr_frame.columns:
+        offset = nr_frame["dist_from_jtwc_km"].dropna()
+        if not offset.empty:
+            print(
+                f"NR 中心与 JTWC 中心距离: 平均 {offset.mean():.0f} km, "
+                f"最大 {offset.max():.0f} km"
+            )
     if not jtwc_window.empty:
         print(
             f"JTWC: min MSLP {jtwc_window['mslp_hpa'].min():.0f} hPa, "
