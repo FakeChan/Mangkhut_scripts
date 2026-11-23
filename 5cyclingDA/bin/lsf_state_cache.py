@@ -55,8 +55,13 @@ def is_array_query(args):
             and ARRAY_QUERY_RE.match(args[4]) is not None)
 
 
-def find_members(job_id):
-    """Read members from the driver's lsf_job.json under RUN_ROOT."""
+ACTIVE_STATES = ("RUN", "PEND", "PSUSP", "USUSP", "SSUSP", "WAIT")
+TERMINAL_STATES = ("DONE", "EXIT")
+KNOWN_STATES = set(ACTIVE_STATES) | set(TERMINAL_STATES)
+
+
+def find_job(job_id):
+    """Return (lsf_job.json path, members) for the driver's array job."""
     root = os.environ.get("RUN_ROOT")
     if not root:
         return None
@@ -70,11 +75,27 @@ def find_members(job_id):
             continue
         members = [int(m) for m in record.get("members", [])]
         if members:
-            candidates.append((path.stat().st_mtime_ns, members))
+            candidates.append((path.stat().st_mtime_ns, path, members))
     if not candidates:
         return None
     candidates.sort()
-    return candidates[-1][1]
+    _, path, members = candidates[-1]
+    return path, members
+
+
+def member_dirs(record_path, member):
+    """Return (run_wrf/<cycle>/<member>, wrfout/<cycle>/<member>)."""
+    experiment_root = record_path.parents[3]
+    cycle_tag = record_path.parents[1].name
+    work = experiment_root / "run_wrf" / cycle_tag / ("%03d" % member)
+    archive = experiment_root / "wrfout" / cycle_tag / ("%03d" % member)
+    return work, archive
+
+
+def filesystem_done(record_path, member):
+    """A member that wrote wrf_done or was archived has definitely finished."""
+    work, archive = member_dirs(record_path, member)
+    return (archive / "member_done.json").is_file() or (work / "wrf_done").is_file()
 
 
 def parse_bhist(text):

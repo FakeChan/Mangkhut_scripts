@@ -17,7 +17,10 @@ import subprocess
 import sys
 
 from lsf_state_cache import (
-    find_members,
+    ACTIVE_STATES,
+    KNOWN_STATES,
+    filesystem_done,
+    find_job,
     is_array_query,
     parse_bhist,
     pass_through,
@@ -27,7 +30,24 @@ from lsf_state_cache import (
 )
 
 
-def states_for_array(job_id, members):
+def array_is_active(job_id, parsed):
+    """True while at least one element is still pending or running."""
+    if any(state in ACTIVE_STATES for state in parsed.values()):
+        return True
+    result = subprocess.run(
+        [real_tool("bjobs"), "-a", "-noheader", "-o", "jobid stat", job_id],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    for line in (result.stdout or "").splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[1] in ACTIVE_STATES:
+            return True
+    return False
+
+
+def states_for_array(job_id, members, record_path):
     states = read_cache(job_id)
     if states is None or any(str(member) not in states for member in members):
         history = subprocess.run(
@@ -37,16 +57,22 @@ def states_for_array(job_id, members):
             text=True,
         )
         parsed = parse_bhist(history.stdout or "")
+        active = array_is_active(job_id, parsed)
         states = {}
         for member in members:
             state = parsed.get(member)
-            if state in ("DONE", "EXIT", "RUN", "PEND",
-                         "PSUSP", "USUSP", "SSUSP", "WAIT"):
+            if state in KNOWN_STATES:
                 states[str(member)] = state
-            else:
-                # The record exists but bhist has not reported this element
-                # yet; treat it as pending so the driver keeps waiting.
+            elif filesystem_done(record_path, member):
+                # LSF history has already been purged, but the member left
+                # wrf_done / member_done.json on disk.
+                states[str(member)] = "DONE"
+            elif active:
                 states[str(member)] = "PEND"
+            else:
+                # Terminal/purged array and no success marker: the element
+                # failed or was killed.
+                states[str(member)] = "EXIT"
         write_cache(job_id, states)
     return states
 
@@ -57,12 +83,13 @@ def main():
         pass_through("bjobs", args)
 
     job_id = args[4]
-    members = find_members(job_id)
-    if not members:
+    found = find_job(job_id)
+    if not found:
         # Not one of the driver's array jobs (e.g. a DART single job).
         pass_through("bjobs", args)
+    record_path, members = found
 
-    states = states_for_array(job_id, members)
+    states = states_for_array(job_id, members, record_path)
     for member in members:
         state = states.get(str(member))
         if state:

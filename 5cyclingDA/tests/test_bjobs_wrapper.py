@@ -8,6 +8,7 @@ states from that history, which the driver's built-in bjobs query cannot do.
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -130,6 +131,56 @@ Mon Nov 23 13:59:01: Done successfully. The CPU time used is 1.0 seconds;
             3: "EXIT",
             4: "DONE",
         })
+
+    def run_with_mocks(self, bhist_text, bjobs_text):
+        mock = self.root / "mock_alt"
+        mock.mkdir(exist_ok=True)
+        write_executable(mock / "bhist",
+                         "#!/bin/sh\nprintf '%s\\n' " + shlex.quote(bhist_text))
+        write_executable(mock / "bjobs",
+                         "#!/bin/sh\nprintf '%s\\n' " + shlex.quote(bjobs_text))
+        env = dict(self.env, REAL_BHIST=str(mock / "bhist"),
+                   REAL_BJOBS=str(mock / "bjobs"))
+        return subprocess.run(
+            [sys.executable, str(BIN / "bjobs"),
+             "-a", "-noheader", "-o", "jobid stat", JOB_ID],
+            env=env, capture_output=True, text=True)
+
+    @staticmethod
+    def parse_states(text):
+        states = {}
+        for line in text.splitlines():
+            fields = line.split()
+            if len(fields) == 2:
+                states[fields[0]] = fields[1]
+        return states
+
+    def test_purged_history_uses_filesystem_markers(self):
+        experiment = self.root / "oceanAssim1Run1" / "EAKF"
+        (experiment / "run_wrf" / "10_00_00" / "001").mkdir(parents=True)
+        (experiment / "run_wrf" / "10_00_00" / "001" / "wrf_done").write_text("id")
+        (experiment / "wrfout" / "10_00_00" / "002").mkdir(parents=True)
+        (experiment / "wrfout" / "10_00_00" / "002" / "member_done.json").write_text("{}")
+
+        result = self.run_with_mocks("No matching job found",
+                                     "Job <20776452> is not found")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        states = self.parse_states(result.stdout)
+        self.assertEqual(len(states), 50)
+        self.assertEqual(states[JOB_ID + "[1]"], "DONE")
+        self.assertEqual(states[JOB_ID + "[2]"], "DONE")
+        self.assertEqual(states[JOB_ID + "[3]"], "EXIT")
+        from collections import Counter
+        counts = Counter(states.values())
+        self.assertEqual(counts["DONE"], 2)
+        self.assertEqual(counts["EXIT"], 48)
+
+    def test_active_array_without_history_is_pending(self):
+        result = self.run_with_mocks("No matching job found", "20776452 RUN")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        states = self.parse_states(result.stdout)
+        self.assertEqual(len(states), 50)
+        self.assertEqual(set(states.values()), {"PEND"})
 
 
 if __name__ == "__main__":

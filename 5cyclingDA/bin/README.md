@@ -12,6 +12,11 @@ These wrappers work around an LSF 10.1 output quirk on lililei1:
 reconstruct per-element states from `bhist -l <array_id>` using the member list
 in `$RUN_ROOT/*/*/jobs/*/attempt_*/lsf_job.json` and cache them.
 
+If LSF has already purged the array from both `bjobs` and `bhist`, the wrapper
+falls back to the filesystem: `run_wrf/<cycle>/<member>/wrf_done` or
+`wrfout/<cycle>/<member>/member_done.json` means `DONE`; a missing marker on a
+terminal/purged array is treated as `EXIT` so the driver retries that member.
+
 ## Files
 
 - `bjobs` - intercepts the driver's array query; non-array calls pass through.
