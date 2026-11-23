@@ -112,4 +112,10 @@ echo " filters EAKF/QCF: ${RUN_EAKF}/${RUN_QCF_RHF}"
 echo " HDF5 library    : ${H5PATH}/lib"
 echo "=============================================================="
 
+# This cluster's bjobs omits the [member] suffix for array elements and
+# purges completed elements, so the driver cannot map array states.  The
+# wrappers in bin/ reconstruct them from bhist; they only affect this job's
+# PATH and do not change the driver or its experiment signature.
+export PATH="${SCRIPT_DIR}/bin:${PATH}"
+
 exec bash "${DRIVER}"

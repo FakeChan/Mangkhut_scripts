@@ -17,3 +17,9 @@
 
 # 等权 LACC 的 NR 辅助 SST 更新方向筛选说明
 !4assimilation/1convert_obs/README_filter_LACC_sst_direction.md
+
+# 50 成员驱动的 LSF 数组状态 wrapper（bjobs/bhist 无扩展名，需要单独放行）
+!5cyclingDA/bin/bjobs
+!5cyclingDA/bin/bhist
+!5cyclingDA/bin/README.md
+!5cyclingDA/tests/fixtures/bhist_20776452.txt

@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""bjobs wrapper for run_driver_50mem_cyclingDA.sh on this LSF cluster.
+
+The driver calls:
+    bjobs -a -noheader -o "jobid stat" <job_id>
+and expects array elements as "job_id[member] state".  This cluster's bjobs
+returns the base job ID without [member] and purges completed array elements,
+so the driver cannot map states.  For the driver's array jobs we reconstruct
+the per-element states from `bhist -l <base_job_id>` using the member list in
+$RUN_ROOT/*/*/jobs/*/attempt_*/lsf_job.json.  Non-array calls pass through to
+the real bjobs unchanged.
+
+This wrapper is only placed ahead of the real bjobs in the controller's PATH;
+the driver and its experiment signature are untouched.
+"""
+import subprocess
+import sys
+
+from lsf_state_cache import (
+    find_members,
+    is_array_query,
+    parse_bhist,
+    pass_through,
+    read_cache,
+    real_tool,
+    write_cache,
+)
+
+
+def states_for_array(job_id, members):
+    states = read_cache(job_id)
+    if states is None or any(str(member) not in states for member in members):
+        history = subprocess.run(
+            [real_tool("bhist"), "-l", job_id],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        parsed = parse_bhist(history.stdout or "")
+        states = {}
+        for member in members:
+            state = parsed.get(member)
+            if state in ("DONE", "EXIT", "RUN", "PEND",
+                         "PSUSP", "USUSP", "SSUSP", "WAIT"):
+                states[str(member)] = state
+            else:
+                # The record exists but bhist has not reported this element
+                # yet; treat it as pending so the driver keeps waiting.
+                states[str(member)] = "PEND"
+        write_cache(job_id, states)
+    return states
+
+
+def main():
+    args = sys.argv[1:]
+    if not is_array_query(args):
+        pass_through("bjobs", args)
+
+    job_id = args[4]
+    members = find_members(job_id)
+    if not members:
+        # Not one of the driver's array jobs (e.g. a DART single job).
+        pass_through("bjobs", args)
+
+    states = states_for_array(job_id, members)
+    for member in members:
+        state = states.get(str(member))
+        if state:
+            print("%s[%d] %s" % (job_id, member, state))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""bhist wrapper for the 50-member controller.
+
+The driver falls back to `bhist -l "<job_id>[<member>]"` when its bulk state
+query does not provide an element.  On this LSF that per-element query can
+take tens of seconds (or appear to hang), so the bjobs wrapper records the
+element states in a small cache.  This wrapper answers the fallback from that
+cache and otherwise passes non-element queries through to the real bhist.
+
+If no cached state is available it returns no event; the driver then treats
+the element as unknown rather than blocking the controller.
+"""
+import sys
+
+from lsf_state_cache import ELEMENT_RE, pass_through, read_cache
+
+CACHE_TTL = 300.0
+
+
+def is_element_query(args):
+    return (len(args) == 2
+            and args[0] == "-l"
+            and ELEMENT_RE.match(args[1]) is not None)
+
+
+def main():
+    args = sys.argv[1:]
+    if not is_element_query(args):
+        pass_through("bhist", args)
+
+    job_id, member = ELEMENT_RE.match(args[1]).groups()
+    states = read_cache(job_id, ttl=CACHE_TTL) or {}
+    state = states.get(member)
+    if state == "DONE":
+        print("Done successfully")
+    elif state == "EXIT":
+        print("Exited")
+    # RUN/PEND: the bjobs wrapper reports these directly; no terminal event.
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
